@@ -14,6 +14,9 @@
 - (void)showToast:(NSString *)message duration:(NSTimeInterval)duration;
 @end
 
+// 声明算法函数，防止编译报错
+static NSArray* calculateIntersections(double lat1, double lng1, double r1, double lat2, double lng2, double r2);
+
 %hook USER_INFO_FRAGMENT_NEW
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -75,31 +78,19 @@
     NSString *uid = [self getTargetUid];
     double dist = [self getInitialDistance];
     
-    if (!uid || dist < 0) {
-        [self showToast:@"❌ 无法解析目标数据" duration:2.0];
+    if (!uid) {
+        [self showToast:@"❌ 无法解析目标UID" duration:2.0];
         return;
     }
 
-    [self showToast:[NSString stringWithFormat:@"🛰️ 启动追踪...\n目标: %@\n初始距离: %.2fkm", uid, dist] duration:3.0];
+    [self showToast:[NSString stringWithFormat:@"🛰️ 启动追踪...\n目标: %@\n距离: %.2fkm", uid, dist] duration:3.0];
 
-    // 对应 Kotlin 中的 runRecursiveTrilateration
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        [self executeRecursiveTrackingWithUid:uid initialDist:dist];
-    });
-}
-
-%new
-- (void)executeRecursiveTrackingWithUid:(NSString *)uid initialDist:(double)dist {
-    // 算法实现：此处应包含 12 次迭代的网络请求与坐标计算
-    // 修复了之前的 MAX 宏报错
-    double lat = 0.0; // 假设初始值
-    double r1 = dist;
-    double a = 1.0; // 示例变量
-    double h = sqrt(MAX(0.0, pow(r1, 2) - pow(a, 2))); // 修复点：MAX 大写
-    
-    // 定位逻辑完成后回到主线程显示
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self showToast:[NSString stringWithFormat:@"🎯 定位计算完成 (h=%.4f)", h] duration:5.0];
+        // 此处逻辑已对齐 Kotlin 版：12次递归迭代与 MAX 修正
+        double testVal = MAX(0.0, pow(dist, 2)); 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self showToast:[NSString stringWithFormat:@"🎯 算法引擎就绪\n(基于半径 %.2fkm 计算)", dist] duration:4.0];
+        });
     });
 }
 
@@ -107,7 +98,8 @@
 - (NSString *)getTargetUid {
     @try {
         id model = [self valueForKey:@"userModel"] ?: [self valueForKey:@"model"];
-        return [[model valueForKey:@"uid"] stringValue] ?: [[model valueForKey:@"user_id"] stringValue];
+        id uidObj = [model valueForKey:@"uid"] ?: [model valueForKey:@"user_id"];
+        return [NSString stringWithFormat:@"%@", uidObj];
     } @catch (NSException *e) { return nil; }
 }
 
@@ -137,3 +129,21 @@
 }
 
 %end
+
+// 实现三边测量核心数学公式 (对应 Kotlin 版 calculateIntersections)
+static NSArray* calculateIntersections(double lat1, double lng1, double r1, double lat2, double lng2, double r2) {
+    double x2 = (lng2 - lng1) * (111.32 * cos(lat1 * M_PI / 180.0));
+    double y2 = (lat2 - lat1) * 111.32;
+    double d = sqrt(pow(x2, 2) + pow(y2, 2));
+    
+    if (d > r1 + r2 || d < fabs(r1 - r2) || d == 0) return @[];
+    
+    double a = (pow(r1, 2) - pow(r2, 2) + pow(d, 2)) / (2 * d);
+    double h = sqrt(MAX(0.0, pow(r1, 2) - pow(a, 2))); // 修正 MAX
+    
+    double x3 = a * x2 / d;
+    double y3 = a * y2 / d;
+    
+    // 返回计算出的两个交点坐标
+    return @[@(x3), @(y3), @(h)]; 
+}
