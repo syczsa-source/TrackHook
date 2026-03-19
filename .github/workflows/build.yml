@@ -8,19 +8,22 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Theos
         run: |
-          sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
+          sudo git clone --recursive --depth 1 https://github.com/theos/theos.git /opt/theos
           echo "THEOS=/opt/theos" >> $GITHUB_ENV
           echo "/opt/theos/bin" >> $GITHUB_PATH
 
       - name: Setup SDK
         run: |
-          git clone https://github.com/theos/sdks.git $THEOS/sdks
+          # 增加重试机制防止 128 错误
+          git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks || (sleep 5 && git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks)
 
       - name: Build Package
         run: |
