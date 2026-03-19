@@ -17,15 +17,29 @@ jobs:
 
       - name: Setup Theos
         run: |
-          # 增加 --depth 1 提高下载速度，减少网络超时概率，克隆失败自动重试
-          sudo git clone --recursive --depth 1 https://github.com/theos/theos.git /opt/theos || (sleep 5 && sudo git clone --recursive --depth 1 https://github.com/theos/theos.git /opt/theos)
+          # 优化Git网络配置，调大传输缓冲区，延长超时时间，减少网络错误
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 0
+          git config --global http.lowSpeedTime 999999
+          
+          # 增加 --depth 1 减少下载体积，最多自动重试3次，彻底解决网络波动导致的克隆失败
+          for i in 1 2 3; do
+            sudo git clone --recursive --depth 1 https://github.com/theos/theos.git /opt/theos && break
+            echo "Theos clone failed, retrying in 5s... attempt $i/3"
+            sleep 5
+          done
+          
           echo "THEOS=/opt/theos" >> $GITHUB_ENV
           echo "/opt/theos/bin" >> $GITHUB_PATH
 
       - name: Setup SDK
         run: |
-          # 克隆失败自动等待5秒后重试，应对临时网络波动
-          git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks || (sleep 5 && git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks)
+          # 最多自动重试3次克隆SDK，彻底解决网络波动导致的克隆失败
+          for i in 1 2 3; do
+            git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks && break
+            echo "SDK clone failed, retrying in 5s... attempt $i/3"
+            sleep 5
+          done
 
       - name: Build Package
         run: |
