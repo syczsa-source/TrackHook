@@ -1,139 +1,49 @@
-name: Build TrackHook (Debug)
+name: Build Theos Tweak
 
 on:
   push:
-    branches: [ main, master ]
-  workflow_dispatch:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
   build:
-    runs-on: macos-14
-    env:
-      # 强制使用Node.js 24，彻底消除警告
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      THEOS: /Users/runner/theos
-      _THEOS_PLATFORM_DPKG_DEB_COMPRESSION: gzip
-
+    runs-on: macos-latest
     steps:
-      - name: 0. 检查Node.js环境
-        run: |
-          echo "Node.js version:"
-          node --version
-          echo "npm version:"
-          npm --version
-
-      - name: 1. Checkout 代码
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 2. 配置Xcode
-        run: |
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-          xcodebuild -version
+      - name: Setup Theos
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-version: master
 
-      - name: 3. 检查已安装工具
+      - name: Fix line endings & Build
         run: |
-          echo "=== 检查系统自带工具 ==="
-          which make gzip
-          make --version
+          # 修复 control 文件 Windows 换行符问题
+          sed -i.bak 's/\r$//' control
+          rm -f control.bak
           
-          echo "=== 检查brew ==="
-          which brew || echo "brew not found"
-          
-          echo "=== 检查目标工具 ==="
-          for tool in dpkg ldid xz; do
-            if command -v $tool &> /dev/null; then
-              echo "$tool found: $(which $tool)"
-              $tool --version
-            else
-              echo "$tool NOT found"
-            fi
-          done
-
-      - name: 4. 安装缺失工具（仅安装缺失的）
-        run: |
-          export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
-          echo "/usr/local/bin" >> $GITHUB_PATH
-          echo "/opt/homebrew/bin" >> $GITHUB_PATH
-
-          # 逐个安装，每个安装独立判断，不影响其他
-          if ! command -v dpkg &> /dev/null; then
-            echo "Installing dpkg..."
-            brew install dpkg || echo "dpkg install failed (non-fatal, will check later)"
-          fi
-          
-          if ! command -v ldid &> /dev/null; then
-            echo "Installing ldid..."
-            brew install ldid || echo "ldid install failed (non-fatal, will check later)"
-          fi
-          
-          if ! command -v xz &> /dev/null; then
-            echo "Installing xz..."
-            brew install xz || echo "xz install failed (non-fatal, will check later)"
-          fi
-
-      - name: 5. 最终工具校验（必须全部通过）
-        run: |
-          export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
-          
-          echo "=== 最终工具校验 ==="
-          for tool in dpkg ldid xz make gzip; do
-            if ! command -v $tool &> /dev/null; then
-              echo "FATAL: $tool is still missing!"
-              exit 1
-            else
-              echo "$tool OK: $(which $tool)"
-            fi
-          done
-
-      - name: 6. 克隆Theos
-        run: |
-          rm -rf $THEOS
-          echo "Cloning Theos..."
-          git clone --recursive --depth 1 --shallow-submodules https://github.com/theos/theos.git $THEOS
-          
-          if [ ! -d "$THEOS/bin" ]; then
-            echo "FATAL: Theos clone failed!"
-            exit 1
-          fi
-          
-          chmod +x $THEOS/bin/*
-          echo "$THEOS/bin" >> $GITHUB_PATH
-
-      - name: 7. 克隆SDK
-        run: |
-          rm -rf $THEOS/sdks
-          echo "Cloning SDKs..."
-          git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks
-          
-          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
-            echo "FATAL: iPhoneOS16.5.sdk not found!"
-            exit 1
-          fi
-          
-          echo "SDKs OK:"
-          ls -la $THEOS/sdks/ | grep .sdk
-
-      - name: 8. 编译
-        run: |
-          export PATH="/usr/local/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
-          export THEOS=$THEOS
-          
+          # 清理旧文件
           make clean 2>/dev/null || true
           rm -rf .theos packages 2>/dev/null || true
           
-          echo "Starting build..."
+          # 编译打包
           make package FINALPACKAGE=1 CODESIGN_IPA=0 V=1
           
+          # 检查是否生成 deb
           if [ ! -f packages/*.deb ]; then
-            echo "FATAL: No deb file!"
+            echo "FATAL: No deb file built!"
             exit 1
           fi
           
-          echo "SUCCESS!"
           ls -la packages/*.deb
+        env:
+          THEOS: ${{ github.workspace }}/theos
+          _THEOS_PLATFORM_DPKG_DEB_COMPRESSION: gzip
 
-      - name: 9. 上传
+      - name: Upload deb
         uses: actions/upload-artifact@v4
         with:
-          name: TrackHook_DEB
+          name: Package
           path: packages/*.deb
