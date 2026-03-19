@@ -24,7 +24,8 @@ jobs:
           
           # 增加 --depth 1 减少下载体积，最多自动重试3次，彻底解决网络波动导致的克隆失败
           for i in 1 2 3; do
-            sudo git clone --recursive --depth 1 https://github.com/theos/theos.git /opt/theos && break
+            # 增加--shallow-submodules，让子模块也浅克隆，大幅减少下载体积，避免子模块克隆超时
+            sudo git clone --recursive --depth 1 --shallow-submodules https://github.com/theos/theos.git /opt/theos && break
             echo "Theos clone failed, retrying in 5s... attempt $i/3"
             sleep 5
           done
