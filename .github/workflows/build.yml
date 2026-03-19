@@ -1,0 +1,34 @@
+name: Build TrackHook
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Theos
+        run: |
+          sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
+          echo "THEOS=/opt/theos" >> $GITHUB_ENV
+          echo "/opt/theos/bin" >> $GITHUB_PATH
+
+      - name: Setup SDK
+        run: |
+          git clone https://github.com/theos/sdks.git $THEOS/sdks
+
+      - name: Build Package
+        run: |
+          # 强制指定 arm64 架构编译
+          make package FINALPACKAGE=1 CODESIGN_IPA=0
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: TrackHook_DEB
+          path: packages/*.deb
