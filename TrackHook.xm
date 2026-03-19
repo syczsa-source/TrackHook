@@ -1,10 +1,11 @@
+// 标准头文件导入
 #import <substrate.h>
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <math.h>
 #import <objc/runtime.h>
 
-// 核心配置
+// 核心配置宏
 #define TRACK_BTN_TAG 100001
 #define MAX_RECURSIVE_ATTEMPTS 12
 #define LOCK_THRESHOLD 0.01
@@ -14,6 +15,25 @@
 static NSString *g_bluedBasicToken = nil;
 static NSString *g_currentTargetUid = nil;
 static double g_initialDistance = -1.0;
+
+// ====================== 【关键修复1：提前声明所有方法，编译器提前识别】 ======================
+@interface UIApplication (TrackHook)
+// 底层工具方法
+- (UIWindow *)getCurrentMainWindow;
+// UI工具方法
+- (void)showToast:(NSString *)message duration:(NSTimeInterval)duration;
+- (void)showResultWithSuccess:(BOOL)success message:(NSString *)message lat:(double)lat lng:(double)lng;
+// 定位算法工具方法
+- (void)updateMyServerLocationWithToken:(NSString *)token lat:(double)lat lng:(double)lng;
+- (double)fetchDynamicDistanceWithUid:(NSString *)uid token:(NSString *)token fakeLat:(double)fakeLat fakeLng:(double)fakeLng;
+- (NSArray *)calculateIntersectionsWithLat1:(double)lat1 lng1:(double)lng1 r1:(double)r1 lat2:(double)lat2 lng2:(double)lng2 r2:(double)r2;
+// 业务核心方法
+- (void)autoFetchCurrentPageUserInfo;
+- (void)runRecursiveTrilaterationWithUid:(NSString *)uid token:(NSString *)token startLat:(double)startLat startLng:(double)startLng startDist:(double)startDist;
+// 按钮相关方法
+- (void)addTrackFloatButton;
+- (void)onTrackButtonClick;
+@end
 
 // ====================== 1. 全局Token自动抓取（无依赖，最先定义） ======================
 %hook NSURLSession
@@ -31,10 +51,10 @@ static double g_initialDistance = -1.0;
 }
 %end
 
-// ====================== 2. 核心Hook：UIApplication（严格按「先定义方法，后调用」顺序） ======================
+// ====================== 2. 核心Hook：UIApplication（【关键修复2：严格按顺序定义方法】） ======================
 %hook UIApplication
 
-// ---------------------- 【第一优先级：基础工具方法】 ----------------------
+// ---------------------- 【第1位：最底层工具方法，所有其他方法都要调用它】 ----------------------
 %new
 - (UIWindow *)getCurrentMainWindow {
     UIWindow *targetWindow = nil;
@@ -57,7 +77,7 @@ static double g_initialDistance = -1.0;
     return targetWindow;
 }
 
-// ---------------------- 【第二优先级：UI工具方法】 ----------------------
+// ---------------------- 【第2位：UI工具方法，被其他方法调用】 ----------------------
 %new
 - (void)showToast:(NSString *)message duration:(NSTimeInterval)duration {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -125,7 +145,7 @@ static double g_initialDistance = -1.0;
     });
 }
 
-// ---------------------- 【第三优先级：定位算法工具方法】 ----------------------
+// ---------------------- 【第3位：定位算法工具方法，被业务方法调用】 ----------------------
 %new
 - (void)updateMyServerLocationWithToken:(NSString *)token lat:(double)lat lng:(double)lng {
     NSString *urlString = [NSString stringWithFormat:@"https://argo.blued.cn/users?sort_by=nearby&latitude=%.8f&longitude=%.8f&limit=1", lat, lng];
@@ -225,7 +245,7 @@ static double g_initialDistance = -1.0;
     return intersections;
 }
 
-// ---------------------- 【第四优先级：业务核心方法】 ----------------------
+// ---------------------- 【第4位：业务核心方法】 ----------------------
 %new
 - (void)autoFetchCurrentPageUserInfo {
     // 重置数据
@@ -378,7 +398,7 @@ static double g_initialDistance = -1.0;
     [self showResultWithSuccess:YES message:resultMsg lat:currentLat lng:currentLng];
 }
 
-// ---------------------- 【第五优先级：按钮相关方法】 ----------------------
+// ---------------------- 【第5位：按钮相关方法】 ----------------------
 %new
 - (void)addTrackFloatButton {
     UIWindow *window = [self getCurrentMainWindow];
@@ -412,7 +432,6 @@ static double g_initialDistance = -1.0;
     NSLog(@"[TrackHook] 悬浮按钮已成功添加到屏幕");
 }
 
-// ---------------------- 【第六优先级：按钮点击事件】 ----------------------
 %new
 - (void)onTrackButtonClick {
     // 自动抓取当前打开的用户主页信息
@@ -463,7 +482,7 @@ static double g_initialDistance = -1.0;
     });
 }
 
-// ---------------------- 【最后：App生命周期入口，所有方法已定义完成，安全调用】 ----------------------
+// ---------------------- 【最后一位：App生命周期入口，所有方法已定义完成，安全调用】 ----------------------
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     BOOL result = %orig;
     // 延迟0.5秒，保证App窗口完全初始化
