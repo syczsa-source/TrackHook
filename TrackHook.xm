@@ -70,7 +70,7 @@
     [self showToast:@"🛰️ 定位算法已加载" duration:3.0];
     
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 使用大写的 MAX 宏修正报错
+        // 修正宏大小写问题，避免编译报错
         double dist = 1.0;
         double h = sqrt(MAX(0.0, pow(dist, 2) - 0.25));
         
