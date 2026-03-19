@@ -9,41 +9,30 @@
 - (void)addTrackButton;
 - (void)removeTrackButton;
 - (void)showToast:(NSString *)message duration:(NSTimeInterval)duration;
+- (UIWindow *)getKeyWindow;
 @end
 
-%hook USER_INFO_FRAGMENT_NEW
+@implementation UIViewController (TrackHook)
 
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self addTrackButton];
-    });
-}
-
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self removeTrackButton];
-    });
-}
-
-%new
-- (void)addTrackButton {
-    UIWindow *window = nil;
+- (UIWindow *)getKeyWindow {
     if (@available(iOS 13.0, *)) {
-        for (UIWindowScene* windowScene in [UIApplication sharedApplication].connectedScenes) {
-            if (windowScene.activationState == UISceneActivationStateForegroundActive) {
-                window = windowScene.windows.firstObject;
-                break;
+        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                for (UIWindow *window in scene.windows) {
+                    if (window.isKeyWindow) return window;
+                }
             }
         }
-    } else {
-        window = [UIApplication sharedApplication].keyWindow;
     }
-    
-    if (!window) return;
-    [self removeTrackButton];
+    return [[UIApplication sharedApplication].windows firstObject];
+}
 
+- (void)addTrackButton {
+    UIWindow *window = [self getKeyWindow];
+    if (!window) return;
+    
+    [self removeTrackButton];
+    
     UIButton *trackBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     trackBtn.tag = TRACK_BTN_TAG;
     [trackBtn setTitle:@"🛰️ 递归几何定位" forState:UIControlStateNormal];
@@ -58,21 +47,18 @@
     [window addSubview:trackBtn];
 }
 
-%new
 - (void)removeTrackButton {
-    UIWindow *window = [UIApplication sharedApplication].windows.firstObject;
+    UIWindow *window = [self getKeyWindow];
     UIView *btn = [window viewWithTag:TRACK_BTN_TAG];
     if (btn) [btn removeFromSuperview];
 }
 
-%new
 - (void)trackBtnClicked:(UIButton *)sender {
     [self showToast:@"🛰️ 定位算法已加载" duration:3.0];
     
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 修正宏大小写问题，避免编译报错
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
         double dist = 1.0;
-        double h = sqrt(MAX(0.0, pow(dist, 2) - 0.25));
+        double h = sqrt(fmax(0.0, dist*dist - 0.25));
         
         dispatch_async(dispatch_get_main_queue(), ^{
             [self showToast:[NSString stringWithFormat:@"🎯 计算就绪\n偏移量: %.4f", h] duration:4.0];
@@ -80,21 +66,39 @@
     });
 }
 
-%new
 - (void)showToast:(NSString *)message duration:(NSTimeInterval)duration {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = [UIApplication sharedApplication].windows.firstObject;
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(50, 100, 250, 80)];
-        label.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
-        label.textColor = [UIColor whiteColor];
-        label.textAlignment = NSTextAlignmentCenter;
-        label.numberOfLines = 0;
-        label.text = message;
-        label.layer.cornerRadius = 10;
-        label.clipsToBounds = YES;
-        [window addSubview:label];
-        [UIView animateWithDuration:0.5 delay:duration options:0 animations:^{ label.alpha = 0; } completion:^(BOOL f){ [label removeFromSuperview]; }];
-    });
+    UIWindow *window = [self getKeyWindow];
+    if (!window) return;
+    
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(50, 100, 250, 80)];
+    label.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
+    label.textColor = UIColor.whiteColor;
+    label.textAlignment = NSTextAlignmentCenter;
+    label.numberOfLines = 0;
+    label.text = message;
+    label.layer.cornerRadius = 10;
+    label.clipsToBounds = YES;
+    [window addSubview:label];
+    
+    [UIView animateWithDuration:0.5 delay:duration options:0 animations:^{
+        label.alpha = 0;
+    } completion:^(BOOL f) {
+        [label removeFromSuperview];
+    }];
+}
+
+@end
+
+%hook USER_INFO_FRAGMENT_NEW
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    [self addTrackButton];
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    [self removeTrackButton];
 }
 
 %end
