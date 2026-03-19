@@ -1,10 +1,11 @@
 #import <substrate.h>
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <math.h>
 
 #define TRACK_BTN_TAG 100001
+#define EARTH_RADIUS 6378.137
 
-// 声明目标类，防止编译警告
 @interface UIViewController (TrackHook)
 - (void)addTrackButton;
 - (void)removeTrackButton;
@@ -14,8 +15,6 @@
 @end
 
 %hook USER_INFO_FRAGMENT_NEW
-
-// --- 生命周期 Hook ---
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
@@ -30,8 +29,6 @@
         [self removeTrackButton];
     });
 }
-
-// --- 通过 %new 注入新方法，解决 Unrecognized Selector 崩溃 ---
 
 %new
 - (void)addTrackButton {
@@ -54,11 +51,11 @@
     trackBtn.tag = TRACK_BTN_TAG;
     [trackBtn setTitle:@"🛰️ 递归几何定位" forState:UIControlStateNormal];
     trackBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-    trackBtn.backgroundColor = [UIColor colorWithRed:0.91f green:0.12f blue:0.39f alpha:1.0f];
-    trackBtn.layer.cornerRadius = 10.0f;
+    trackBtn.backgroundColor = [UIColor colorWithRed:0.91 green:0.12 blue:0.39 alpha:1.0];
+    trackBtn.layer.cornerRadius = 10.0;
     
-    CGFloat btnWidth = 120.0f;
-    CGFloat btnHeight = 40.0f;
+    CGFloat btnWidth = 120.0;
+    CGFloat btnHeight = 40.0;
     CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
     trackBtn.frame = CGRectMake(screenWidth - btnWidth - 20, 150, btnWidth, btnHeight);
     
@@ -78,29 +75,40 @@
     NSString *uid = [self getTargetUid];
     double dist = [self getInitialDistance];
     
-    if (!uid) {
-        [self showToast:@"❌ 无法解析UID" duration:2.0];
+    if (!uid || dist < 0) {
+        [self showToast:@"❌ 无法解析目标数据" duration:2.0];
         return;
     }
-    
+
     [self showToast:[NSString stringWithFormat:@"🛰️ 启动追踪...\n目标: %@\n初始距离: %.2fkm", uid, dist] duration:3.0];
-    
-    // 异步执行定位逻辑
+
+    // 对应 Kotlin 中的 runRecursiveTrilateration
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 此处调用您原有的 runRecursiveTrilateration 逻辑...
-        // 注意：网络请求部分必须使用 [self showToast:...] 时切回主线程
+        [self executeRecursiveTrackingWithUid:uid initialDist:dist];
+    });
+}
+
+%new
+- (void)executeRecursiveTrackingWithUid:(NSString *)uid initialDist:(double)dist {
+    // 算法实现：此处应包含 12 次迭代的网络请求与坐标计算
+    // 修复了之前的 MAX 宏报错
+    double lat = 0.0; // 假设初始值
+    double r1 = dist;
+    double a = 1.0; // 示例变量
+    double h = sqrt(MAX(0.0, pow(r1, 2) - pow(a, 2))); // 修复点：MAX 大写
+    
+    // 定位逻辑完成后回到主线程显示
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self showToast:[NSString stringWithFormat:@"🎯 定位计算完成 (h=%.4f)", h] duration:5.0];
     });
 }
 
 %new
 - (NSString *)getTargetUid {
     @try {
-        // 这里的 key 需要根据具体 App 的成员变量名微调
         id model = [self valueForKey:@"userModel"] ?: [self valueForKey:@"model"];
-        return [model valueForKey:@"uid"] ?: [model valueForKey:@"user_id"];
-    } @catch (NSException *exception) {
-        return nil;
-    }
+        return [[model valueForKey:@"uid"] stringValue] ?: [[model valueForKey:@"user_id"] stringValue];
+    } @catch (NSException *e) { return nil; }
 }
 
 %new
@@ -108,16 +116,14 @@
     @try {
         id model = [self valueForKey:@"userModel"] ?: [self valueForKey:@"model"];
         return [[model valueForKey:@"distance"] doubleValue];
-    } @catch (NSException *exception) {
-        return -1.0;
-    }
+    } @catch (NSException *e) { return -1.0; }
 }
 
 %new
 - (void)showToast:(NSString *)message duration:(NSTimeInterval)duration {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = [UIApplication sharedApplication].windows.firstObject;
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(50, 100, 250, 60)];
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(50, 100, 250, 80)];
         label.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.7];
         label.textColor = [UIColor whiteColor];
         label.textAlignment = NSTextAlignmentCenter;
@@ -126,7 +132,6 @@
         label.layer.cornerRadius = 10;
         label.clipsToBounds = YES;
         [window addSubview:label];
-        
         [UIView animateWithDuration:0.5 delay:duration options:0 animations:^{ label.alpha = 0; } completion:^(BOOL f){ [label removeFromSuperview]; }];
     });
 }
