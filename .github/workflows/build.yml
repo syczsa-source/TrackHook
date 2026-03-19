@@ -1,4 +1,3 @@
-
 name: Build TrackHook
 
 on:
@@ -8,127 +7,129 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      THEOS: ${{ github.workspace }}/theos
+      THEOS: /Users/runner/theos
+      TARGET_SDK_PATH: $(THEOS)/sdks
       _THEOS_PLATFORM_DPKG_DEB_COMPRESSION: gzip
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Checkout 仓库代码
+        uses: actions/checkout@v4
 
-      - name: Switch to Full Xcode Environment
+      - name: 配置Xcode官方编译环境
         run: |
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Install Theos Required Dependencies
+      - name: 安装Theos编译必需依赖（极简版，无重试）
         run: |
-          # 核心修复：强制将brew路径前置到PATH最顶端，优先调用brew安装的工具
+          # 适配Intel/Apple Silicon双架构brew路径
           export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
           echo "/usr/local/bin" >> $GITHUB_PATH
           echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+          # 核心修复：仅安装真正缺失的包，跳过已安装的，避免brew返回非零退出码
+          if ! command -v dpkg &> /dev/null; then
+            echo "Installing dpkg..."
+            brew install dpkg
+          fi
           
-          # 安装完整依赖链：dpkg是deb打包核心必需工具，ldid用于签名，xz/gzip用于压缩，make用于构建
-          brew install dpkg ldid xz gzip make
+          if ! command -v ldid &> /dev/null; then
+            echo "Installing ldid..."
+            brew install ldid
+          fi
           
-          # 校验所有核心工具是否安装成功，失败则自动重试安装
-          for tool in dpkg ldid xz gzip make; do
+          if ! command -v xz &> /dev/null; then
+            echo "Installing xz..."
+            brew install xz
+          fi
+
+          # 强制校验核心工具，必须全部存在才继续
+          for tool in dpkg ldid xz make gzip; do
             if ! command -v $tool &> /dev/null; then
-              echo "$tool not found, reinstalling..."
-              brew reinstall $tool
+              echo "FATAL: $tool is missing!"
+              exit 1
             fi
           done
-          
-          # 输出工具版本，确认安装生效
-          echo "=== Core Tools Version ==="
+
+          # 输出工具版本确认
+          echo "=== 核心工具就绪 ==="
           dpkg --version
           ldid --version
           xz --version
-          make --version
 
-      - name: Setup Theos Environment
+      - name: 安装Theos编译环境（修复克隆重试逻辑）
         run: |
-          # 优化Git网络配置，调大传输缓冲区，延长超时时间，减少网络错误
           git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 0
-          git config --global http.lowSpeedTime 999999
-          
-          # 清理残留的旧Theos文件，避免缓存干扰
+          git config --global http.lowSpeedTime 600
+          git config --global core.compression 0
+
           rm -rf $THEOS
-          
-          # 无sudo浅克隆+子模块浅克隆+3次自动重试，彻底解决网络波动导致的克隆失败
+
           for i in 1 2 3; do
+            echo "Theos clone attempt $i/3"
             git clone --recursive --depth 1 --shallow-submodules https://github.com/theos/theos.git $THEOS && break
-            echo "Theos clone failed, retrying in 5s... attempt $i/3"
+            rm -rf $THEOS
+            echo "Theos clone failed, retrying in 5s..."
             sleep 5
           done
-          
-          # 校验Theos是否克隆成功，失败直接终止，避免后续无效执行
+
           if [ ! -d "$THEOS/bin" ]; then
-            echo "Theos installation failed! bin directory not found"
+            echo "FATAL: Theos install failed!"
             exit 1
           fi
-          
-          # 给Theos核心脚本添加执行权限，避免权限不足导致的执行失败
+
           chmod +x $THEOS/bin/*
-          
-          # 将Theos的bin目录加入系统PATH，确保命令能被全局识别
           echo "$THEOS/bin" >> $GITHUB_PATH
 
-      - name: Setup iOS SDKs
+      - name: 安装iOS 16.5 SDK（匹配您的手机系统）
         run: |
-          # 清理残留的旧SDK文件
           rm -rf $THEOS/sdks
-          
-          # 3次自动重试克隆SDK，彻底解决网络波动导致的克隆失败
+
           for i in 1 2 3; do
+            echo "SDK clone attempt $i/3"
             git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks && break
-            echo "SDK clone failed, retrying in 5s... attempt $i/3"
+            rm -rf $THEOS/sdks
+            echo "SDK clone failed, retrying in 5s..."
             sleep 5
           done
-          
-          # 校验SDK是否克隆成功，且存在对应版本的SDK
+
           if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
-            echo "SDK installation failed! iPhoneOS16.5.sdk not found"
+            echo "FATAL: iPhoneOS16.5.sdk not found!"
             exit 1
           fi
-          
-          # 列出所有可用SDK，方便日志排查
-          echo "Available SDKs:"
+
+          echo "=== 可用SDK列表 ==="
           ls -la $THEOS/sdks/ | grep .sdk
 
-      - name: Clean Old Build Cache
+      - name: 清理旧编译缓存（完全容错）
         run: |
-          # 完全容错的缓存清理，即使清理失败也不中断构建流程
           make clean 2>/dev/null || true
           rm -rf .theos packages 2>/dev/null || true
-          echo "Old build cache cleaned"
+          echo "旧编译缓存清理完成"
 
-      - name: Build & Package Tweak
+      - name: 编译并打包Tweak
         run: |
-          # 再次确认brew路径前置，确保工具调用正常
           export PATH="/usr/local/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
-          
-          # 无sudo执行make，遵循Theos官方普通用户运行规范
-          # 增加V=1输出详细编译日志，方便后续排查问题
+          export THEOS=$THEOS
+
           make package FINALPACKAGE=1 CODESIGN_IPA=0 V=1
-          
-          # 校验编译结果，确保deb文件成功生成
+
           if [ ! -f packages/*.deb ]; then
-            echo "Build failed! No deb package generated"
+            echo "FATAL: 编译失败，未生成deb安装包"
             exit 1
           fi
-          
-          # 输出生成的deb文件信息，确认构建成功
-          echo "Build success! Generated package:"
+
+          echo "=== 编译成功！生成安装包 ==="
           ls -la packages/*.deb
 
-      - name: Upload Build Artifact
+      - name: 上传编译产物
         uses: actions/upload-artifact@v4
         with:
-          name: TrackHook_DEB_Package
+          name: TrackHook_iOS16.5_DEB
           path: packages/*.deb
           if-no-files-found: error
