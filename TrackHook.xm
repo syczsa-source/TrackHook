@@ -1,56 +1,43 @@
-// iOS Theos 标准头文件，无任何额外依赖
 #import <substrate.h>
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <math.h>
 #import <objc/runtime.h>
 
-// 核心配置（和安卓版功能逻辑对齐，但语法全是iOS原生）
+// 核心配置
 #define TRACK_BTN_TAG 100001
 #define MAX_RECURSIVE_ATTEMPTS 12
 #define LOCK_THRESHOLD 0.01
 #define EARTH_RADIUS_KM 111.32
 
-// 全局静态变量，符合iOS Tweak规范
+// 全局静态变量
 static NSString *g_bluedBasicToken = nil;
 static NSString *g_currentTargetUid = nil;
 static double g_initialDistance = -1.0;
 
-// ====================== 1. 全局Token自动抓取（iOS原生NSURLSession Hook） ======================
+// ====================== 1. 全局Token自动抓取（无依赖，最先定义） ======================
 %hook NSURLSession
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    // 精准抓取Blued的Basic Token，完全适配iOS版请求头
     NSDictionary *headers = request.allHTTPHeaderFields;
     NSString *authHeader = headers[@"authorization"] ?: headers[@"Authorization"];
     if (authHeader && [authHeader hasPrefix:@"Basic "]) {
         NSString *basicToken = [authHeader substringFromIndex:6];
         if (basicToken.length > 0 && ![g_bluedBasicToken isEqualToString:basicToken]) {
             g_bluedBasicToken = basicToken;
-            NSLog(@"[TrackHook] 成功抓取Basic Token: %@", basicToken);
+            NSLog(@"[TrackHook] 成功抓取Basic Token");
         }
     }
     return %orig(request, completionHandler);
 }
 %end
 
-// ====================== 2. 核心Hook：App启动就加载按钮（100%必现，不依赖Blued类名） ======================
+// ====================== 2. 核心Hook：UIApplication（严格按「先定义工具方法，后调用」的顺序） ======================
 %hook UIApplication
-// iOS App生命周期入口，替代安卓的Activity生命周期
-- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    BOOL result = %orig;
-    // 延迟0.5秒，保证App窗口完全初始化，避免window为nil
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self addTrackFloatButton];
-        NSLog(@"[TrackHook] 悬浮按钮已成功添加到窗口");
-    });
-    return result;
-}
 
-// %new声明：Theos规范，给系统类新增方法
+// ---------------------- 【第一优先级：基础工具方法，所有其他方法都要调用它】 ----------------------
 %new
 - (UIWindow *)getCurrentMainWindow {
     UIWindow *targetWindow = nil;
-    // 兼容iOS 13+的Scene场景，适配所有iOS版本
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive) {
@@ -64,174 +51,78 @@ static double g_initialDistance = -1.0;
             }
         }
     }
-    // 多层兜底，100%能拿到有效窗口
     if (!targetWindow) targetWindow = [UIApplication sharedApplication].keyWindow;
     if (!targetWindow) targetWindow = [UIApplication sharedApplication].windows.firstObject;
     return targetWindow;
 }
 
+// ---------------------- 【第二优先级：UI工具方法】 ----------------------
 %new
-- (void)addTrackFloatButton {
-    UIWindow *window = [self getCurrentMainWindow];
-    if (!window) return;
-    
-    // 防止重复创建按钮
-    UIView *existBtn = [window viewWithTag:TRACK_BTN_TAG];
-    if (existBtn) return;
-
-    // iOS原生UIButton，替代安卓的TextView
-    UIButton *trackBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    trackBtn.tag = TRACK_BTN_TAG;
-    [trackBtn setTitle:@"🛰️ 递归几何定位" forState:UIControlStateNormal];
-    trackBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
-    [trackBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    trackBtn.backgroundColor = [UIColor colorWithRed:0.91 green:0.12 blue:0.39 alpha:1.0];
-    trackBtn.layer.cornerRadius = 22;
-    trackBtn.layer.borderWidth = 2;
-    trackBtn.layer.borderColor = [UIColor whiteColor].CGColor;
-    trackBtn.clipsToBounds = YES;
-    
-    // 固定在屏幕右上角，不会超出屏幕，一眼可见
-    CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
-    trackBtn.frame = CGRectMake(screenWidth - 160, 180, 130, 44);
-    // 最高层级，永远不会被页面遮挡
-    trackBtn.layer.zPosition = MAXFLOAT;
-    
-    // iOS原生点击事件，替代安卓的setOnClickListener
-    [trackBtn addTarget:self action:@selector(onTrackButtonClick) forControlEvents:UIControlEventTouchUpInside];
-    
-    [window addSubview:trackBtn];
-}
-
-%new
-- (void)removeTrackFloatButton {
-    UIWindow *window = [self getCurrentMainWindow];
-    UIView *btn = [window viewWithTag:TRACK_BTN_TAG];
-    if (btn) [btn removeFromSuperview];
-}
-
-%new
-- (void)autoFetchCurrentPageUserInfo {
-    // 重置数据
-    g_currentTargetUid = nil;
-    g_initialDistance = -1.0;
-    
-    // iOS原生获取当前顶层页面，替代安卓的getActivity
-    UIViewController *topVC = [self getCurrentMainWindow].rootViewController;
-    while (topVC.presentedViewController) {
-        topVC = topVC.presentedViewController;
-    }
-    if ([topVC isKindOfClass:[UINavigationController class]]) {
-        topVC = ((UINavigationController *)topVC).topViewController;
-    }
-    if (!topVC) return;
-    
-    NSLog(@"[TrackHook] 当前页面VC: %@", NSStringFromClass([topVC class]));
-    
-    // iOS runtime遍历属性，替代安卓的java反射
-    unsigned int propertyCount = 0;
-    objc_property_t *properties = class_copyPropertyList([topVC class], &propertyCount);
-    
-    for (int i = 0; i < propertyCount; i++) {
-        objc_property_t property = properties[i];
-        NSString *propertyName = [NSString stringWithUTF8String:property_getName(property)];
+- (void)showToast:(NSString *)message duration:(NSTimeInterval)duration {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = [self getCurrentMainWindow];
+        if (!window) return;
         
-        @try {
-            id userModel = [topVC valueForKey:propertyName];
-            if (!userModel) continue;
-            
-            // 提取用户UID
-            NSString *tempUid = [userModel valueForKey:@"uid"] ?: [userModel valueForKey:@"user_id"];
-            if (tempUid && tempUid.length > 0) {
-                g_currentTargetUid = tempUid;
-                NSLog(@"[TrackHook] 成功抓取目标UID: %@", g_currentTargetUid);
-                
-                // 提取初始距离，兼容数字/字符串两种格式
-                id distanceObj = [userModel valueForKey:@"distance"];
-                if (distanceObj) {
-                    if ([distanceObj isKindOfClass:[NSNumber class]]) {
-                        g_initialDistance = [distanceObj doubleValue];
-                    } else if ([distanceObj isKindOfClass:[NSString class]]) {
-                        NSCharacterSet *nonNumSet = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789."] invertedSet];
-                        NSString *cleanDistStr = [(NSString *)distanceObj stringByTrimmingCharactersInSet:nonNumSet];
-                        g_initialDistance = cleanDistStr.doubleValue;
-                    }
-                    NSLog(@"[TrackHook] 成功抓取初始距离: %.2f km", g_initialDistance);
-                }
-                break;
+        for (UIView *subview in window.subviews) {
+            if ([subview isKindOfClass:[UILabel class]] && subview.tag == 99999) {
+                [subview removeFromSuperview];
             }
-        } @catch (NSException *exception) {
-            continue;
         }
-    }
-    free(properties);
-    
-    // 兜底方案：从页面参数中获取UID
-    if (!g_currentTargetUid) {
-        @try {
-            NSDictionary *params = [topVC valueForKey:@"queryParameters"];
-            if (params) {
-                g_currentTargetUid = params[@"uid"] ?: params[@"user_id"];
-                if (g_currentTargetUid) {
-                    NSLog(@"[TrackHook] 从页面参数抓取到UID: %@", g_currentTargetUid);
-                }
-            }
-        } @catch (NSException *exception) {}
-    }
+        
+        CGFloat toastWidth = 300;
+        CGFloat toastHeight = 100;
+        UILabel *toastLabel = [[UILabel alloc] initWithFrame:CGRectMake(
+            (window.bounds.size.width - toastWidth)/2,
+            (window.bounds.size.height - toastHeight)/2,
+            toastWidth,
+            toastHeight
+        )];
+        toastLabel.tag = 99999;
+        toastLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
+        toastLabel.textColor = [UIColor whiteColor];
+        toastLabel.textAlignment = NSTextAlignmentCenter;
+        toastLabel.numberOfLines = 0;
+        toastLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+        toastLabel.text = message;
+        toastLabel.layer.cornerRadius = 12;
+        toastLabel.clipsToBounds = YES;
+        toastLabel.layer.zPosition = MAXFLOAT + 1;
+        
+        [window addSubview:toastLabel];
+        
+        [UIView animateWithDuration:0.5 delay:duration options:0 animations:^{
+            toastLabel.alpha = 0;
+        } completion:^(BOOL finished) {
+            [toastLabel removeFromSuperview];
+        }];
+    });
 }
 
-// ====================== 3. 核心功能：按钮点击事件（1:1复刻安卓版逻辑，iOS原生语法） ======================
 %new
-- (void)onTrackButtonClick {
-    // 自动抓取当前打开的用户主页信息
-    [self autoFetchCurrentPageUserInfo];
-    
-    // 1. 校验参数
-    if (!g_currentTargetUid || g_currentTargetUid.length == 0) {
-        [self showToast:@"❌ 请先打开目标用户的个人主页" duration:3.0];
-        return;
-    }
-    if (g_initialDistance < 0) {
-        [self showToast:@"❌ 无法解析此人的距离" duration:3.0];
-        return;
-    }
-    if (g_initialDistance >= 9999.0 || g_initialDistance <= 0.0) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"⚠️ 追踪中止" message:[NSString stringWithFormat:@"目标开启了高阶隐身，下发了无效距离 (%.2f)。", g_initialDistance] preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"我知道了" style:UIAlertActionStyleDefault handler:nil]];
-        [[self getCurrentMainWindow].rootViewController presentViewController:alert animated:YES completion:nil];
-        return;
-    }
-    if (!g_bluedBasicToken || g_bluedBasicToken.length == 0) {
-        [self showToast:@"Token为空！请先刷一下附近人页面再试" duration:4.0];
-        return;
-    }
-    
-    // 2. 获取自己的初始坐标
-    NSUserDefaults *bluedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.bluecity.blued"];
-    double initialLat = [bluedDefaults doubleForKey:@"current_latitude"] ?: [bluedDefaults doubleForKey:@"my_latitude"];
-    double initialLng = [bluedDefaults doubleForKey:@"current_longitude"] ?: [bluedDefaults doubleForKey:@"my_longitude"];
-    
-    if (initialLat == 0 || initialLng == 0) {
-        [self showToast:@"无法获取当前坐标，请刷新附近人页面" duration:3.0];
-        return;
-    }
-    
-    // 3. 启动递归定位
-    [self showToast:[NSString stringWithFormat:@"雷达启动！\n原点距离: %.2fkm\n开始递归计算交点...", g_initialDistance] duration:4.0];
-    
-    // 子线程执行算法，避免主线程卡顿
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        @try {
-            [self runRecursiveTrilaterationWithUid:g_currentTargetUid token:g_bluedBasicToken startLat:initialLat startLng:initialLng startDist:g_initialDistance];
-        } @catch (NSException *exception) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self showToast:[NSString stringWithFormat:@"算法崩溃: %@", exception.reason] duration:4.0];
-            });
+- (void)showResultWithSuccess:(BOOL)success message:(NSString *)message lat:(double)lat lng:(double)lng {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = [self getCurrentMainWindow];
+        if (!window) return;
+        
+        if (success) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🎯 雷达锁定成功" message:[NSString stringWithFormat:@"%@\n\n可直接复制至漫游中心空降。", message] preferredStyle:UIAlertControllerStyleAlert];
+            
+            [alert addAction:[UIAlertAction actionWithTitle:@"复制坐标" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+                UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+                pasteboard.string = [NSString stringWithFormat:@"%.8f, %.8f", lat, lng];
+                [self showToast:@"复制成功" duration:2.0];
+            }]];
+            
+            [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+            
+            [window.rootViewController presentViewController:alert animated:YES completion:nil];
+        } else {
+            [self showToast:[NSString stringWithFormat:@"追踪失败: %@", message] duration:4.0];
         }
     });
 }
 
-// ====================== 4. 定位核心算法（1:1复刻安卓版公式，iOS原生语法） ======================
+// ---------------------- 【第三优先级：定位算法工具方法】 ----------------------
 %new
 - (void)updateMyServerLocationWithToken:(NSString *)token lat:(double)lat lng:(double)lng {
     NSString *urlString = [NSString stringWithFormat:@"https://argo.blued.cn/users?sort_by=nearby&latitude=%.8f&longitude=%.8f&limit=1", lat, lng];
@@ -255,7 +146,7 @@ static double g_initialDistance = -1.0;
 %new
 - (double)fetchDynamicDistanceWithUid:(NSString *)uid token:(NSString *)token fakeLat:(double)fakeLat fakeLng:(double)fakeLng {
     [self updateMyServerLocationWithToken:token lat:fakeLat lng:fakeLng];
-    [NSThread sleepForTimeInterval:1.0]; // 和安卓版一致，等待坐标同步
+    [NSThread sleepForTimeInterval:1.0];
     
     NSString *urlString = [NSString stringWithFormat:@"https://argo.blued.cn/users/%@/basic", uid];
     NSURL *url = [NSURL URLWithString:urlString];
@@ -333,6 +224,74 @@ static double g_initialDistance = -1.0;
     return intersections;
 }
 
+// ---------------------- 【第四优先级：业务核心方法】 ----------------------
+%new
+- (void)autoFetchCurrentPageUserInfo {
+    g_currentTargetUid = nil;
+    g_initialDistance = -1.0;
+    
+    UIWindow *window = [self getCurrentMainWindow];
+    if (!window) return;
+    
+    UIViewController *topVC = window.rootViewController;
+    while (topVC.presentedViewController) {
+        topVC = topVC.presentedViewController;
+    }
+    if ([topVC isKindOfClass:[UINavigationController class]]) {
+        topVC = ((UINavigationController *)topVC).topViewController;
+    }
+    if (!topVC) return;
+    
+    NSLog(@"[TrackHook] 当前页面VC: %@", NSStringFromClass([topVC class]));
+    
+    unsigned int propertyCount = 0;
+    objc_property_t *properties = class_copyPropertyList([topVC class], &propertyCount);
+    
+    for (int i = 0; i < propertyCount; i++) {
+        objc_property_t property = properties[i];
+        NSString *propertyName = [NSString stringWithUTF8String:property_getName(property)];
+        
+        @try {
+            id userModel = [topVC valueForKey:propertyName];
+            if (!userModel) continue;
+            
+            NSString *tempUid = [userModel valueForKey:@"uid"] ?: [userModel valueForKey:@"user_id"];
+            if (tempUid && tempUid.length > 0) {
+                g_currentTargetUid = tempUid;
+                NSLog(@"[TrackHook] 成功抓取目标UID: %@", g_currentTargetUid);
+                
+                id distanceObj = [userModel valueForKey:@"distance"];
+                if (distanceObj) {
+                    if ([distanceObj isKindOfClass:[NSNumber class]]) {
+                        g_initialDistance = [distanceObj doubleValue];
+                    } else if ([distanceObj isKindOfClass:[NSString class]]) {
+                        NSCharacterSet *nonNumSet = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789."] invertedSet];
+                        NSString *cleanDistStr = [(NSString *)distanceObj stringByTrimmingCharactersInSet:nonNumSet];
+                        g_initialDistance = cleanDistStr.doubleValue;
+                    }
+                    NSLog(@"[TrackHook] 成功抓取初始距离: %.2f km", g_initialDistance);
+                }
+                break;
+            }
+        } @catch (NSException *exception) {
+            continue;
+        }
+    }
+    free(properties);
+    
+    if (!g_currentTargetUid) {
+        @try {
+            NSDictionary *params = [topVC valueForKey:@"queryParameters"];
+            if (params) {
+                g_currentTargetUid = params[@"uid"] ?: params[@"user_id"];
+                if (g_currentTargetUid) {
+                    NSLog(@"[TrackHook] 从页面参数抓取到UID: %@", g_currentTargetUid);
+                }
+            }
+        } @catch (NSException *exception) {}
+    }
+}
+
 %new
 - (void)runRecursiveTrilaterationWithUid:(NSString *)uid token:(NSString *)token startLat:(double)startLat startLng:(double)startLng startDist:(double)startDist {
     double currentLat = startLat;
@@ -403,70 +362,96 @@ static double g_initialDistance = -1.0;
     [self showResultWithSuccess:YES message:resultMsg lat:currentLat lng:currentLng];
 }
 
-// ====================== 5. UI工具方法（iOS原生，替代安卓的Toast/AlertDialog） ======================
+// ---------------------- 【第五优先级：按钮相关方法】 ----------------------
 %new
-- (void)showResultWithSuccess:(BOOL)success message:(NSString *)message lat:(double)lat lng:(double)lng {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = [self getCurrentMainWindow];
-        if (!window) return;
-        
-        if (success) {
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🎯 雷达锁定成功" message:[NSString stringWithFormat:@"%@\n\n可直接复制至漫游中心空降。", message] preferredStyle:UIAlertControllerStyleAlert];
-            
-            [alert addAction:[UIAlertAction actionWithTitle:@"复制坐标" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-                UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
-                pasteboard.string = [NSString stringWithFormat:@"%.8f, %.8f", lat, lng];
-                [self showToast:@"复制成功" duration:2.0];
-            }]];
-            
-            [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-            
-            [window.rootViewController presentViewController:alert animated:YES completion:nil];
-        } else {
-            [self showToast:[NSString stringWithFormat:@"追踪失败: %@", message] duration:4.0];
+- (void)addTrackFloatButton {
+    UIWindow *window = [self getCurrentMainWindow];
+    if (!window) return;
+    
+    UIView *existBtn = [window viewWithTag:TRACK_BTN_TAG];
+    if (existBtn) return;
+
+    UIButton *trackBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    trackBtn.tag = TRACK_BTN_TAG;
+    [trackBtn setTitle:@"🛰️ 递归几何定位" forState:UIControlStateNormal];
+    trackBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+    [trackBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    trackBtn.backgroundColor = [UIColor colorWithRed:0.91 green:0.12 blue:0.39 alpha:1.0];
+    trackBtn.layer.cornerRadius = 22;
+    trackBtn.layer.borderWidth = 2;
+    trackBtn.layer.borderColor = [UIColor whiteColor].CGColor;
+    trackBtn.clipsToBounds = YES;
+    
+    CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
+    trackBtn.frame = CGRectMake(screenWidth - 160, 180, 130, 44);
+    trackBtn.layer.zPosition = MAXFLOAT;
+    
+    [trackBtn addTarget:self action:@selector(onTrackButtonClick) forControlEvents:UIControlEventTouchUpInside];
+    
+    [window addSubview:trackBtn];
+    NSLog(@"[TrackHook] 悬浮按钮已成功添加");
+}
+
+%new
+- (void)removeTrackFloatButton {
+    UIWindow *window = [self getCurrentMainWindow];
+    UIView *btn = [window viewWithTag:TRACK_BTN_TAG];
+    if (btn) [btn removeFromSuperview];
+}
+
+// ---------------------- 【第六优先级：按钮点击事件】 ----------------------
+%new
+- (void)onTrackButtonClick {
+    [self autoFetchCurrentPageUserInfo];
+    
+    if (!g_currentTargetUid || g_currentTargetUid.length == 0) {
+        [self showToast:@"❌ 请先打开目标用户的个人主页" duration:3.0];
+        return;
+    }
+    if (g_initialDistance < 0) {
+        [self showToast:@"❌ 无法解析此人的距离" duration:3.0];
+        return;
+    }
+    if (g_initialDistance >= 9999.0 || g_initialDistance <= 0.0) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"⚠️ 追踪中止" message:[NSString stringWithFormat:@"目标开启了高阶隐身，下发了无效距离 (%.2f)。", g_initialDistance] preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"我知道了" style:UIAlertActionStyleDefault handler:nil]];
+        [[self getCurrentMainWindow].rootViewController presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    if (!g_bluedBasicToken || g_bluedBasicToken.length == 0) {
+        [self showToast:@"Token为空！请先刷一下附近人页面再试" duration:4.0];
+        return;
+    }
+    
+    NSUserDefaults *bluedDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.bluecity.blued"];
+    double initialLat = [bluedDefaults doubleForKey:@"current_latitude"] ?: [bluedDefaults doubleForKey:@"my_latitude"];
+    double initialLng = [bluedDefaults doubleForKey:@"current_longitude"] ?: [bluedDefaults doubleForKey:@"my_longitude"];
+    
+    if (initialLat == 0 || initialLng == 0) {
+        [self showToast:@"无法获取当前坐标，请刷新附近人页面" duration:3.0];
+        return;
+    }
+    
+    [self showToast:[NSString stringWithFormat:@"雷达启动！\n原点距离: %.2fkm\n开始递归计算交点...", g_initialDistance] duration:4.0];
+    
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @try {
+            [self runRecursiveTrilaterationWithUid:g_currentTargetUid token:g_bluedBasicToken startLat:initialLat startLng:initialLng startDist:g_initialDistance];
+        } @catch (NSException *exception) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self showToast:[NSString stringWithFormat:@"算法崩溃: %@", exception.reason] duration:4.0];
+            });
         }
     });
 }
 
-%new
-- (void)showToast:(NSString *)message duration:(NSTimeInterval)duration {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = [self getCurrentMainWindow];
-        if (!window) return;
-        
-        for (UIView *subview in window.subviews) {
-            if ([subview isKindOfClass:[UILabel class]] && subview.tag == 99999) {
-                [subview removeFromSuperview];
-            }
-        }
-        
-        CGFloat toastWidth = 300;
-        CGFloat toastHeight = 100;
-        UILabel *toastLabel = [[UILabel alloc] initWithFrame:CGRectMake(
-            (window.bounds.size.width - toastWidth)/2,
-            (window.bounds.size.height - toastHeight)/2,
-            toastWidth,
-            toastHeight
-        )];
-        toastLabel.tag = 99999;
-        toastLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
-        toastLabel.textColor = [UIColor whiteColor];
-        toastLabel.textAlignment = NSTextAlignmentCenter;
-        toastLabel.numberOfLines = 0;
-        toastLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-        toastLabel.text = message;
-        toastLabel.layer.cornerRadius = 12;
-        toastLabel.clipsToBounds = YES;
-        toastLabel.layer.zPosition = MAXFLOAT + 1;
-        
-        [window addSubview:toastLabel];
-        
-        [UIView animateWithDuration:0.5 delay:duration options:0 animations:^{
-            toastLabel.alpha = 0;
-        } completion:^(BOOL finished) {
-            [toastLabel removeFromSuperview];
-        }];
+// ---------------------- 【最后：App生命周期入口，所有方法都已定义完成，可安全调用】 ----------------------
+- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    BOOL result = %orig;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self addTrackFloatButton];
     });
+    return result;
 }
 
 %end
