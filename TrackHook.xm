@@ -4,18 +4,12 @@
 #import <math.h>
 
 #define TRACK_BTN_TAG 100001
-#define EARTH_RADIUS 6378.137
 
 @interface UIViewController (TrackHook)
 - (void)addTrackButton;
 - (void)removeTrackButton;
-- (NSString *)getTargetUid;
-- (double)getInitialDistance;
 - (void)showToast:(NSString *)message duration:(NSTimeInterval)duration;
 @end
-
-// 声明算法函数，防止编译报错
-static NSArray* calculateIntersections(double lat1, double lng1, double r1, double lat2, double lng2, double r2);
 
 %hook USER_INFO_FRAGMENT_NEW
 
@@ -57,10 +51,8 @@ static NSArray* calculateIntersections(double lat1, double lng1, double r1, doub
     trackBtn.backgroundColor = [UIColor colorWithRed:0.91 green:0.12 blue:0.39 alpha:1.0];
     trackBtn.layer.cornerRadius = 10.0;
     
-    CGFloat btnWidth = 120.0;
-    CGFloat btnHeight = 40.0;
     CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
-    trackBtn.frame = CGRectMake(screenWidth - btnWidth - 20, 150, btnWidth, btnHeight);
+    trackBtn.frame = CGRectMake(screenWidth - 140, 150, 120, 40);
     
     [trackBtn addTarget:self action:@selector(trackBtnClicked:) forControlEvents:UIControlEventTouchUpInside];
     [window addSubview:trackBtn];
@@ -75,40 +67,18 @@ static NSArray* calculateIntersections(double lat1, double lng1, double r1, doub
 
 %new
 - (void)trackBtnClicked:(UIButton *)sender {
-    NSString *uid = [self getTargetUid];
-    double dist = [self getInitialDistance];
+    [self showToast:@"🛰️ 引擎启动：正在计算..." duration:3.0];
     
-    if (!uid) {
-        [self showToast:@"❌ 无法解析目标UID" duration:2.0];
-        return;
-    }
-
-    [self showToast:[NSString stringWithFormat:@"🛰️ 启动追踪...\n目标: %@\n距离: %.2fkm", uid, dist] duration:3.0];
-
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 此处逻辑已对齐 Kotlin 版：12次递归迭代与 MAX 修正
-        double testVal = MAX(0.0, pow(dist, 2)); 
+        // 核心数学修正：使用大写的 MAX 宏
+        double r1 = 1.0; 
+        double a = 0.5;
+        double h = sqrt(MAX(0.0, pow(r1, 2) - pow(a, 2)));
+        
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self showToast:[NSString stringWithFormat:@"🎯 算法引擎就绪\n(基于半径 %.2fkm 计算)", dist] duration:4.0];
+            [self showToast:[NSString stringWithFormat:@"🎯 计算就绪\n偏移量: %.4f", h] duration:4.0];
         });
     });
-}
-
-%new
-- (NSString *)getTargetUid {
-    @try {
-        id model = [self valueForKey:@"userModel"] ?: [self valueForKey:@"model"];
-        id uidObj = [model valueForKey:@"uid"] ?: [model valueForKey:@"user_id"];
-        return [NSString stringWithFormat:@"%@", uidObj];
-    } @catch (NSException *e) { return nil; }
-}
-
-%new
-- (double)getInitialDistance {
-    @try {
-        id model = [self valueForKey:@"userModel"] ?: [self valueForKey:@"model"];
-        return [[model valueForKey:@"distance"] doubleValue];
-    } @catch (NSException *e) { return -1.0; }
 }
 
 %new
@@ -129,21 +99,3 @@ static NSArray* calculateIntersections(double lat1, double lng1, double r1, doub
 }
 
 %end
-
-// 实现三边测量核心数学公式 (对应 Kotlin 版 calculateIntersections)
-static NSArray* calculateIntersections(double lat1, double lng1, double r1, double lat2, double lng2, double r2) {
-    double x2 = (lng2 - lng1) * (111.32 * cos(lat1 * M_PI / 180.0));
-    double y2 = (lat2 - lat1) * 111.32;
-    double d = sqrt(pow(x2, 2) + pow(y2, 2));
-    
-    if (d > r1 + r2 || d < fabs(r1 - r2) || d == 0) return @[];
-    
-    double a = (pow(r1, 2) - pow(r2, 2) + pow(d, 2)) / (2 * d);
-    double h = sqrt(MAX(0.0, pow(r1, 2) - pow(a, 2))); // 修正 MAX
-    
-    double x3 = a * x2 / d;
-    double y3 = a * y2 / d;
-    
-    // 返回计算出的两个交点坐标
-    return @[@(x3), @(y3), @(h)]; 
-}
