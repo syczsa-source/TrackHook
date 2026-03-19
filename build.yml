@@ -1,0 +1,39 @@
+name: Build TrackHook
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Theos
+        run: |
+          sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
+          echo "THEOS=/opt/theos" >> $GITHUB_ENV
+          echo "/opt/theos/bin" >> $GITHUB_PATH
+
+      - name: Setup iOS SDK
+        run: |
+          # 从社区仓库下载已精简的 SDK (此处以 16.5 为例，兼容您的 17.0/15.0 设置)
+          git clone https://github.com/theos/sdks.git $THEOS/sdks
+
+      - name: Build Package
+        run: |
+          export THEOS=/opt/theos
+          # 禁用签名以防止 Action 环境缺少证书报错
+          make package FINALPACKAGE=1 CODESIGN_IPA=0
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: TrackHook-Deb
+          path: packages/*.deb

@@ -1,0 +1,9 @@
+Package: com.yourname.trackhook
+Name: TrackHook
+Depends: mobilesubstrate
+Version: 0.0.1
+Architecture: iphoneos-arm64
+Description: 坐标递归追踪插件
+Maintainer: YourName
+Author: YourName
+Section: Tweaks
