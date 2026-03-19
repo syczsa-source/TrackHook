@@ -10,28 +10,44 @@ jobs:
   build:
     runs-on: macos-latest
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # 彻底消除 Node.js 20 弃用警告
-      THEOS: ${{ github.workspace }}/theos       # 全局统一THEOS路径，确保跨step生效
-      _THEOS_PLATFORM_DPKG_DEB_COMPRESSION: gzip # 修复打包压缩格式兼容性问题，避免lzma导致的打包失败
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      THEOS: ${{ github.workspace }}/theos
+      _THEOS_PLATFORM_DPKG_DEB_COMPRESSION: gzip
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6  # 升级到支持Node.js 24的最新稳定版本，彻底消除警告
+        uses: actions/checkout@v6
 
       - name: Switch to Full Xcode Environment
         run: |
-          # 核心修复：强制切换到完整Xcode.app的开发者目录，Theos不支持仅命令行工具
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-          # 验证Xcode环境是否生效
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
       - name: Install Theos Required Dependencies
         run: |
-          # 安装Theos编译&打包必需的所有依赖，避免缺失工具导致的失败
-          brew install ldid xz gzip make
-          # 验证brew工具是否生效
-          which ldid xz gzip
+          # 核心修复：强制将brew路径前置到PATH最顶端，优先调用brew安装的工具
+          export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+          echo "/usr/local/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/bin" >> $GITHUB_PATH
+          
+          # 安装完整依赖链：dpkg是deb打包核心必需工具，ldid用于签名，xz/gzip用于压缩，make用于构建
+          brew install dpkg ldid xz gzip make
+          
+          # 校验所有核心工具是否安装成功，失败则自动重试安装
+          for tool in dpkg ldid xz gzip make; do
+            if ! command -v $tool &> /dev/null; then
+              echo "$tool not found, reinstalling..."
+              brew reinstall $tool
+            fi
+          done
+          
+          # 输出工具版本，确认安装生效
+          echo "=== Core Tools Version ==="
+          dpkg --version
+          ldid --version
+          xz --version
+          make --version
 
       - name: Setup Theos Environment
         run: |
@@ -86,13 +102,16 @@ jobs:
 
       - name: Clean Old Build Cache
         run: |
-          # 清理旧的编译缓存，避免缓存导致的编译异常
-          make clean
-          rm -rf .theos packages
+          # 完全容错的缓存清理，即使清理失败也不中断构建流程
+          make clean 2>/dev/null || true
+          rm -rf .theos packages 2>/dev/null || true
           echo "Old build cache cleaned"
 
       - name: Build & Package Tweak
         run: |
+          # 再次确认brew路径前置，确保工具调用正常
+          export PATH="/usr/local/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
+          
           # 无sudo执行make，遵循Theos官方普通用户运行规范
           # 增加V=1输出详细编译日志，方便后续排查问题
           make package FINALPACKAGE=1 CODESIGN_IPA=0 V=1
