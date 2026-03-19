@@ -10,7 +10,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Theos
         run: |
@@ -24,11 +24,10 @@ jobs:
 
       - name: Build Package
         run: |
-          # 强制指定 arm64 架构编译
           make package FINALPACKAGE=1 CODESIGN_IPA=0
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: TrackHook_DEB
           path: packages/*.deb
