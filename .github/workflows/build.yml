@@ -9,24 +9,26 @@ jobs:
   build:
     runs-on: macos-latest
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # 消除 Node 警告
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Theos
         run: |
+          # 增加 --depth 1 提高下载速度，防止 128 错误
           sudo git clone --recursive --depth 1 https://github.com/theos/theos.git /opt/theos
           echo "THEOS=/opt/theos" >> $GITHUB_ENV
           echo "/opt/theos/bin" >> $GITHUB_PATH
 
       - name: Setup SDK
         run: |
-          # 增加重试机制防止 128 错误
+          # 如果克隆失败，自动等待 5 秒并重试一次
           git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks || (sleep 5 && git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks)
 
       - name: Build Package
         run: |
+          export THEOS=/opt/theos
           make package FINALPACKAGE=1 CODESIGN_IPA=0
 
       - name: Upload Artifact
