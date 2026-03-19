@@ -2,38 +2,40 @@ name: Build TrackHook
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-latest
-
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # 消除 Node 警告
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Theos
         run: |
-          sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
+          # 使用 --depth 1 极大缩小下载量，减少 128 错误几率
+          sudo git clone --recursive --depth 1 https://github.com/theos/theos.git /opt/theos
           echo "THEOS=/opt/theos" >> $GITHUB_ENV
           echo "/opt/theos/bin" >> $GITHUB_PATH
 
-      - name: Setup iOS SDK
+      - name: Setup SDK
         run: |
-          # 从社区仓库下载已精简的 SDK (此处以 16.5 为例，兼容您的 17.0/15.0 设置)
-          git clone https://github.com/theos/sdks.git $THEOS/sdks
+          # 增加失败重试逻辑
+          for i in {1..3}; do
+            git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks && break || sleep 10;
+          done
 
       - name: Build Package
         run: |
+          # 显式声明环境路径
           export THEOS=/opt/theos
-          # 禁用签名以防止 Action 环境缺少证书报错
           make package FINALPACKAGE=1 CODESIGN_IPA=0
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: TrackHook-Deb
+          name: TrackHook_DEB
           path: packages/*.deb
