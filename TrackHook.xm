@@ -16,13 +16,12 @@ static NSString *g_currentTargetUid = nil;
 static double g_initialDistance = -1.0;
 static UIButton *g_trackButton = nil;
 
-// ====================== 唯一UIViewController Hook块，所有方法严格按「先实现后调用」顺序排列 ======================
+// ====================== 唯一UIViewController Hook块，所有方法严格按「先定义后调用」顺序排列 ======================
 %hook UIViewController
 
 // ---------------------- 【第1层：最底层工具方法，所有其他方法都要调用，必须放在最前面】 ----------------------
 %new
 - (UIWindow *)trackHook_getSafeKeyWindow {
-    // 统一获取主窗口，彻底解决类型不匹配问题，无任何强转风险
     UIWindow *keyWindow = nil;
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -40,7 +39,6 @@ static UIButton *g_trackButton = nil;
 
 %new
 - (UIViewController *)trackHook_getTopViewController {
-    // 直接获取当前顶层VC，无任何类型错误
     UIViewController *topVC = [self trackHook_getSafeKeyWindow].rootViewController;
     while (topVC.presentedViewController) {
         topVC = topVC.presentedViewController;
