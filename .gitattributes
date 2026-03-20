@@ -1,0 +1,4 @@
+control text eol=lf
+*.xm text eol=lf
+Makefile text eol=lf
+*.plist text eol=lf
