@@ -1,8 +1,7 @@
 ARCHS = arm64
 TARGET = iphone:clang:16.5:15.0
-INSTALL_TARGET_PROCESSES = com.bluecity.blued
+INSTALL_TARGET_PROCESSES = com.soft.blued
 
-# 编译容错+警告消除
 ADDITIONAL_CFLAGS += -Wno-deprecated-declarations -Wno-error -fobjc-arc
 THEOS_IGNORE_PARALLEL_BUILDING_NOTICE = yes
 
