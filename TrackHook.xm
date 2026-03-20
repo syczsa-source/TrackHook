@@ -8,7 +8,7 @@
 // 核心配置宏
 #define TRACK_BTN_TAG 100001
 #define EARTH_RADIUS_KM 111.32
-#define BLUED_BUNDLE_ID @"com.soft.blued"
+#define BLUED_BUNDLE_ID @"com.bluecity.blued"
 
 // 全局静态变量（强引用按钮，防止被系统释放）
 static NSString *g_bluedBasicToken = nil;
