@@ -12,6 +12,30 @@ static double g_currentLng = 0.0;
 static double g_targetDistance = -1.0;
 static UIWindow *g_floatWindow = nil;
 
+// ==================== 自定义窗口类 - 解决事件拦截问题 ====================
+@interface TrackHookWindow : UIWindow
+@end
+
+@implementation TrackHookWindow
+
+// 重写此方法，只让悬浮按钮接收事件，其他事件传递给下层窗口
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    // 1. 首先让系统处理（包括悬浮按钮）
+    UIView *hitView = [super hitTest:point withEvent:event];
+    
+    // 2. 如果点击到了悬浮按钮，返回按钮
+    UIView *btnView = [self viewWithTag:TRACK_BTN_TAG];
+    if (btnView && [btnView pointInside:[self convertPoint:point toView:btnView] withEvent:event]) {
+        return hitView; // 返回按钮，允许点击
+    }
+    
+    // 3. 其他情况返回nil，让事件传递给下层窗口
+    return nil;
+}
+
+@end
+// ==================== 自定义窗口类结束 ====================
+
 // ==================== 类别方法声明 ====================
 @interface UIViewController (TrackHookMethods)
 - (NSString *)extractUserIdFromUI;
@@ -352,17 +376,18 @@ static UIWindow *g_floatWindow = nil;
         if (!g_floatWindow || g_floatWindow.windowScene != targetScene) {
             // 如果窗口不存在，或不属于当前活跃的场景，则重新创建
             CGRect screenBounds = targetScene.coordinateSpace.bounds;
-            g_floatWindow = [[UIWindow alloc] initWithFrame:screenBounds];
-            g_floatWindow.windowScene = targetScene; // 【关键】关联到当前场景
-            g_floatWindow.windowLevel = UIWindowLevelAlert + 1000; // 设为非常高的层级
-            g_floatWindow.backgroundColor = [UIColor clearColor];
-            g_floatWindow.rootViewController = [UIViewController new]; // 避免警告
-            g_floatWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
-            g_floatWindow.userInteractionEnabled = YES;
-            g_floatWindow.hidden = NO;
-            [g_floatWindow makeKeyAndVisible]; // 【关键】尝试成为Key Window
             
-            NSLog(@"TrackHook: 🪟 已创建/更新独立悬浮窗口 (Scene: %@, Level: %.0f)", targetScene, g_floatWindow.windowLevel);
+            // 【关键修复】使用自定义窗口类
+            g_floatWindow = [[TrackHookWindow alloc] initWithFrame:screenBounds];
+            g_floatWindow.windowScene = targetScene;
+            g_floatWindow.windowLevel = UIWindowLevelStatusBar + 10; // 适度调整窗口层级
+            g_floatWindow.backgroundColor = [UIColor clearColor];
+            g_floatWindow.rootViewController = [UIViewController new];
+            g_floatWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
+            g_floatWindow.userInteractionEnabled = YES; // 允许交互
+            g_floatWindow.hidden = NO;
+            
+            NSLog(@"TrackHook: 🪟 已创建/更新独立悬浮窗口 (使用TrackHookWindow)");
         }
         
         // 3. 移除旧按钮（如果存在）
@@ -385,15 +410,15 @@ static UIWindow *g_floatWindow = nil;
         btn.layer.shadowColor = [UIColor blackColor].CGColor;
         btn.layer.shadowOffset = CGSizeMake(0, 2);
         btn.layer.shadowOpacity = 0.3;
+        btn.userInteractionEnabled = YES; // 确保按钮可交互
         
-        // 【关键修复】: 将 UIEventTouchUpInside 改为 UIControlEventTouchUpInside
         [btn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
         [btn addGestureRecognizer:pan];
         
         [g_floatWindow addSubview:btn];
         
-        NSLog(@"TrackHook: ✅ 悬浮按钮已添加到独立窗口");
+        NSLog(@"TrackHook: ✅ 悬浮按钮已添加到独立窗口 (窗口可穿透点击)");
     });
 }
 
@@ -472,9 +497,14 @@ static UIWindow *g_floatWindow = nil;
             [self th_addBtn];
         });
     } else {
-        // 【修改点】仅在明确需要时，才考虑隐藏按钮。此处先简单记录日志，观察规律。
-        NSLog(@"TrackHook: 📍 当前页面 (%@) 非目标页面，暂不处理按钮。", clsName);
-        // 注意：这里不再主动移除按钮，因为我们的悬浮窗口是全局独立的。
+        // 在非目标页面，隐藏按钮但保留窗口
+        if (g_floatWindow) {
+            UIView *btn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
+            if (btn) {
+                [btn removeFromSuperview];
+                NSLog(@"TrackHook: 📍 在非目标页面移除按钮");
+            }
+        }
     }
 }
 %end
