@@ -11,6 +11,8 @@
 static NSLock *g_dataLock = nil;
 static NSString *g_bluedBasicToken = nil;
 static NSString *g_currentTargetUid = nil;
+static double g_currentLat = 0.0;
+static double g_currentLng = 0.0;
 static double g_initialDistance = -1.0;
 
 @interface UIViewController (TrackHook)
@@ -22,6 +24,7 @@ static double g_initialDistance = -1.0;
 - (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
 - (NSString *)extractUserIdFromUI;
 - (double)extractDistanceFromUI;
+- (void)debugLogCurrentDataState;
 @end
 
 %hook UIViewController
@@ -48,119 +51,99 @@ static double g_initialDistance = -1.0;
 %new
 - (void)th_onBtnClick {
     NSLog(@"TrackHook: th_onBtnClick 被触发");
-    if (!self || ![self isKindOfClass:[UIViewController class]]) return;
     
-    [self th_autoFetchUserInfo];
+    if (!self || ![self isKindOfClass:[UIViewController class]]) {
+        NSLog(@"TrackHook: ❌ 控制器无效");
+        return;
+    }
+    
+    [self debugLogCurrentDataState];
     
     [g_dataLock lock];
     NSString *targetUid = [g_currentTargetUid copy];
     NSString *basicToken = [g_bluedBasicToken copy];
-    double initialDist = g_initialDistance;
+    double myLat = g_currentLat;
+    double myLng = g_currentLng;
     [g_dataLock unlock];
     
-    NSLog(@"TrackHook: 当前数据 - UID: %@, Token: %@, 距离: %.2f", 
+    NSLog(@"TrackHook: 📊 当前数据 - UID: %@, Token: %@, 坐标: (%.6f, %.6f)", 
           targetUid ?: @"<空>", 
           basicToken ? @"<有>" : @"<空>", 
-          initialDist);
+          myLat, myLng);
     
-    if (!targetUid || !basicToken || initialDist <= 0) {
+    if (!targetUid || !basicToken || fabs(myLat) < 0.001 || fabs(myLng) < 0.001) {
         NSString *msg = @"未获取到必要数据";
         if (!targetUid) msg = @"未获取到用户ID";
         else if (!basicToken) msg = @"未获取到认证令牌";
-        else if (initialDist <= 0) msg = @"未获取到距离信息";
+        else if (fabs(myLat) < 0.001 || fabs(myLng) < 0.001) msg = @"未获取到坐标信息";
         
         [self th_showToast:msg duration:2.0];
         return;
     }
 
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:BLUED_BUNDLE_ID];
-    if (!ud) {
-        [self th_showToast:@"无法访问应用数据" duration:2.0];
-        return;
-    }
-    
-    double myLat = [ud doubleForKey:@"current_latitude"];
-    double myLng = [ud doubleForKey:@"current_longitude"];
-    
-    if (fabs(myLat) < 0.001 && fabs(myLng) < 0.001) {
-        [self th_showToast:@"本地GPS数据无效" duration:2.0];
-        return;
-    }
-
-    [self th_showToast:@"🛰️ 三角定位计算中..." duration:1.5];
+    [self th_showToast:@"📡 获取距离信息中..." duration:1.5];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        double minLng = myLng - 1.0;
-        double maxLng = myLng + 1.0;
-        double estimatedLng = myLng;
-        double currentDist = initialDist;
-        BOOL success = NO;
-        int maxIterations = 15;
-        double tolerance = 0.01;
+        NSString *urlStr = [NSString stringWithFormat:@"https://argo.blued.cn/users/%@/basic", targetUid];
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+        [req setValue:[NSString stringWithFormat:@"Basic %@", basicToken] forHTTPHeaderField:@"Authorization"];
+        req.timeoutInterval = 5.0;
+        req.HTTPMethod = @"GET";
 
-        for (int i = 0; i < maxIterations && !success; i++) {
-            NSString *urlStr = [NSString stringWithFormat:@"https://argo.blued.cn/users/%@/basic", targetUid];
-            NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
-            [req setValue:[NSString stringWithFormat:@"Basic %@", basicToken] forHTTPHeaderField:@"Authorization"];
-            req.timeoutInterval = 3.0;
-            req.HTTPMethod = @"GET";
-
-            __block double newDist = -1.0;
-            __block BOOL requestFailed = NO;
-            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-            
-            NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
-                if (!err && data) {
-                    @try {
-                        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                        if (json && [json[@"data"] isKindOfClass:[NSDictionary class]]) {
-                            newDist = [json[@"data"][@"distance"] doubleValue];
-                        }
-                    } @catch (NSException *exception) {
+        __block double distance = -1.0;
+        __block BOOL requestFailed = NO;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        
+        NSLog(@"TrackHook: 🌐 请求用户距离: %@", urlStr);
+        
+        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
+            if (!err && data) {
+                @try {
+                    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if (json && [json[@"data"] isKindOfClass:[NSDictionary class]]) {
+                        distance = [json[@"data"][@"distance"] doubleValue];
+                        NSLog(@"TrackHook: ✅ 获取到距离: %.2f km", distance);
+                    } else {
+                        NSLog(@"TrackHook: ⚠️ 响应格式异常: %@", json);
                         requestFailed = YES;
                     }
-                } else {
+                } @catch (NSException *exception) {
+                    NSLog(@"TrackHook: ❌ JSON解析异常: %@", exception);
                     requestFailed = YES;
                 }
-                dispatch_semaphore_signal(sem);
-            }];
-            [task resume];
-            
-            if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC))) != 0) {
-                break;
-            }
-            
-            if (requestFailed || newDist < 0) {
-                break;
-            }
-            
-            double deltaDist = newDist - currentDist;
-            if (fabs(deltaDist) < tolerance) {
-                success = YES;
-                break;
-            } else if (deltaDist > 0) {
-                maxLng = estimatedLng;
             } else {
-                minLng = estimatedLng;
+                NSLog(@"TrackHook: ❌ 网络请求错误: %@", err);
+                requestFailed = YES;
             }
-            estimatedLng = (minLng + maxLng) / 2.0;
-            currentDist = newDist;
-            
-            [NSThread sleepForTimeInterval:0.15];
+            dispatch_semaphore_signal(sem);
+        }];
+        [task resume];
+        
+        if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC))) != 0) {
+            NSLog(@"TrackHook: ⏰ 请求超时");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self th_showToast:@"请求超时" duration:2.0];
+            });
+            return;
+        }
+        
+        if (requestFailed || distance <= 0) {
+            NSLog(@"TrackHook: ❌ 无法获取距离信息");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self th_showToast:@"无法获取距离信息" duration:2.0];
+            });
+            return;
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (success) {
-                NSString *resStr = [NSString stringWithFormat:@"纬度: %.6f\n经度: %.6f\n初始距离: %.2f km", myLat, estimatedLng, initialDist];
-                UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:@"定位计算完成" message:resStr preferredStyle:UIAlertControllerStyleAlert];
-                [resAlert addAction:[UIAlertAction actionWithTitle:@"复制坐标" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-                    [[UIPasteboard generalPasteboard] setString:[NSString stringWithFormat:@"%.6f, %.6f", myLat, estimatedLng]];
-                }]];
-                [resAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-                [self presentViewController:resAlert animated:YES completion:nil];
-            } else {
-                [self th_showToast:@"计算失败，请检查网络或稍后重试" duration:2.0];
-            }
+            NSString *resStr = [NSString stringWithFormat:@"纬度: %.6f\n经度: %.6f\n距离: %.2f km", myLat, myLng, distance];
+            UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:@"定位信息" message:resStr preferredStyle:UIAlertControllerStyleAlert];
+            [resAlert addAction:[UIAlertAction actionWithTitle:@"复制坐标" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
+                [[UIPasteboard generalPasteboard] setString:[NSString stringWithFormat:@"%.6f, %.6f", myLat, myLng]];
+                NSLog(@"TrackHook: 📋 已复制坐标到剪贴板");
+            }]];
+            [resAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:resAlert animated:YES completion:nil];
         });
     });
 }
@@ -171,45 +154,59 @@ static double g_initialDistance = -1.0;
     
     [g_dataLock lock];
     g_currentTargetUid = nil;
+    g_currentLat = 0.0;
+    g_currentLng = 0.0;
     g_initialDistance = -1.0;
     [g_dataLock unlock];
     
     @try {
         NSString *uid = nil;
-        double distance = -1.0;
+        double lat = 0.0;
+        double lng = 0.0;
         
-        // 从网络Hook已捕获的数据中读取（主要来源）
         [g_dataLock lock];
         uid = [g_currentTargetUid copy];
         NSString *basicToken = [g_bluedBasicToken copy];
+        lat = g_currentLat;
+        lng = g_currentLng;
         [g_dataLock unlock];
         
         if (uid) {
-            NSLog(@"TrackHook: 从网络请求中获取到 UID: %@", uid);
+            NSLog(@"TrackHook: ✅ 从网络请求中获取到 UID: %@", uid);
         } else {
-            NSLog(@"TrackHook: 网络请求中尚未捕获到UID");
+            NSLog(@"TrackHook: ⚠️ 网络请求中尚未捕获到UID");
         }
         
         if (basicToken) {
-            NSLog(@"TrackHook: 已获取到 Basic Token");
+            NSLog(@"TrackHook: ✅ 已获取到 Basic Token");
         } else {
-            NSLog(@"TrackHook: 尚未获取到 Basic Token");
+            NSLog(@"TrackHook: ⚠️ 尚未获取到 Basic Token");
+        }
+        
+        if (fabs(lat) > 0.001 && fabs(lng) > 0.001) {
+            NSLog(@"TrackHook: ✅ 已获取到坐标: (%.6f, %.6f)", lat, lng);
+        } else {
+            NSLog(@"TrackHook: ⚠️ 尚未获取到坐标");
         }
         
         // 备用策略：如果网络未捕获到UID，尝试从UI文本中提取
         if (!uid || uid.length == 0) {
             uid = [self extractUserIdFromUI];
             if (uid) {
-                NSLog(@"TrackHook: 从UI文本中提取到 UID: %@", uid);
+                NSLog(@"TrackHook: ✅ 从UI文本中提取到 UID: %@", uid);
             }
         }
         
-        // 距离信息从UI中提取（主要来源）
-        distance = [self extractDistanceFromUI];
-        if (distance > 0) {
-            NSLog(@"TrackHook: 从UI中提取到距离: %.2f km", distance);
-        } else {
-            NSLog(@"TrackHook: 未在UI中找到距离信息");
+        // 如果还没有坐标，尝试从应用存储中读取
+        if (fabs(lat) < 0.001 && fabs(lng) < 0.001) {
+            NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:BLUED_BUNDLE_ID];
+            if (ud) {
+                lat = [ud doubleForKey:@"current_latitude"];
+                lng = [ud doubleForKey:@"current_longitude"];
+                if (fabs(lat) > 0.001 && fabs(lng) > 0.001) {
+                    NSLog(@"TrackHook: ✅ 从应用存储读取到坐标: (%.6f, %.6f)", lat, lng);
+                }
+            }
         }
         
         // 最终处理
@@ -219,24 +216,20 @@ static double g_initialDistance = -1.0;
             if (cleanUid.length >= 6) {
                 [g_dataLock lock];
                 g_currentTargetUid = [cleanUid copy];
-                g_initialDistance = distance;
+                g_currentLat = lat;
+                g_currentLng = lng;
                 [g_dataLock unlock];
-                NSLog(@"TrackHook: 成功保存目标数据 - UID: %@, Distance: %.2f", cleanUid, distance);
+                NSLog(@"TrackHook: 🎯 成功保存目标数据 - UID: %@, 坐标: (%.6f, %.6f)", cleanUid, lat, lng);
                 return;
             } else {
-                NSLog(@"TrackHook: 提取到的UID '%@' 清理后 '%@' 长度不足", uid, cleanUid);
+                NSLog(@"TrackHook: ⚠️ 提取到的UID '%@' 清理后 '%@' 长度不足", uid, cleanUid);
             }
         }
         
-        // 如果缺少Token
-        if (!basicToken || basicToken.length == 0) {
-            NSLog(@"TrackHook: 缺少必要的 Basic Token");
-        }
-        
-        NSLog(@"TrackHook: 数据不完整，无法进行计算");
+        NSLog(@"TrackHook: ❌ 数据不完整，无法进行计算");
         
     } @catch (NSException *exception) {
-        NSLog(@"TrackHook: th_autoFetchUserInfo 捕获到异常: %@", exception);
+        NSLog(@"TrackHook: ❌ th_autoFetchUserInfo 异常: %@", exception);
     }
 }
 
@@ -255,17 +248,15 @@ static double g_initialDistance = -1.0;
             NSString *text = label.text;
             
             if (text && text.length > 0) {
-                // 匹配 "ID:161766904" 这种显式格式
                 if ([text hasPrefix:@"ID:"] && text.length > 3) {
                     NSString *userId = [text substringFromIndex:3];
                     if (userId.length >= 6) {
                         foundUid = userId;
-                        NSLog(@"TrackHook: 从Label提取到ID (前缀匹配): %@", foundUid);
+                        NSLog(@"TrackHook: 🔍 从Label提取到ID (前缀匹配): %@", foundUid);
                         return;
                     }
                 }
                 
-                // 使用正则表达式提取长数字串
                 NSError *error = nil;
                 NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\d{6,}" options:0 error:&error];
                 if (!error) {
@@ -273,7 +264,7 @@ static double g_initialDistance = -1.0;
                     if (match) {
                         NSString *userId = [text substringWithRange:match.range];
                         foundUid = userId;
-                        NSLog(@"TrackHook: 从Label文本 '%@' 中正则提取到ID: %@", text, foundUid);
+                        NSLog(@"TrackHook: 🔍 从Label文本 '%@' 中提取到ID: %@", text, foundUid);
                         return;
                     }
                 }
@@ -291,7 +282,7 @@ static double g_initialDistance = -1.0;
     @try {
         searchBlock(self.view);
     } @catch (NSException *exception) {
-        NSLog(@"TrackHook: extractUserIdFromUI 递归异常: %@", exception);
+        NSLog(@"TrackHook: ⚠️ extractUserIdFromUI 递归异常: %@", exception);
     }
     
     return foundUid;
@@ -299,7 +290,6 @@ static double g_initialDistance = -1.0;
 
 %new
 - (double)extractDistanceFromUI {
-    // 策略1：精准定位 BDDistanceAndTimeView
     __block double foundDistance = -1.0;
     
     __block void (^__weak weakSearchBlock)(UIView *);
@@ -308,11 +298,9 @@ static double g_initialDistance = -1.0;
     weakSearchBlock = searchBlock = ^(UIView *view) {
         if (!view || foundDistance > 0) return;
         
-        // 查找 BDDistanceAndTimeView
         if ([NSStringFromClass([view class]) isEqualToString:@"BDDistanceAndTimeView"]) {
-            NSLog(@"TrackHook: 找到 BDDistanceAndTimeView");
+            NSLog(@"TrackHook: 🔍 找到 BDDistanceAndTimeView");
             
-            // 遍历子视图寻找距离标签
             for (UIView *subview in view.subviews) {
                 if ([subview isKindOfClass:[UILabel class]]) {
                     UILabel *label = (UILabel *)subview;
@@ -323,7 +311,7 @@ static double g_initialDistance = -1.0;
                         double distance = 0.0;
                         if ([scanner scanDouble:&distance] && distance > 0) {
                             foundDistance = distance;
-                            NSLog(@"TrackHook: 从 BDDistanceAndTimeView 提取到距离: %.2f km", distance);
+                            NSLog(@"TrackHook: ✅ 从 BDDistanceAndTimeView 提取到距离: %.2f km", distance);
                             return;
                         }
                     }
@@ -341,9 +329,7 @@ static double g_initialDistance = -1.0;
     
     searchBlock(self.view);
     
-    // 策略2：如果没找到BDDistanceAndTimeView，尝试全局搜索
     if (foundDistance <= 0) {
-        NSLog(@"TrackHook: 未找到BDDistanceAndTimeView，尝试全局搜索");
         __block void (^__weak weakSearchBlock2)(UIView *);
         void (^searchBlock2)(UIView *);
         
@@ -359,7 +345,7 @@ static double g_initialDistance = -1.0;
                     double distance = 0.0;
                     if ([scanner scanDouble:&distance] && distance > 0) {
                         foundDistance = distance;
-                        NSLog(@"TrackHook: 从全局Label提取到距离: %.2f km", distance);
+                        NSLog(@"TrackHook: 🔍 从全局Label提取到距离: %.2f km", distance);
                         return;
                     }
                 }
@@ -377,26 +363,41 @@ static double g_initialDistance = -1.0;
     }
     
     if (foundDistance <= 0) {
-        NSLog(@"TrackHook: 未在UI中找到距离信息");
+        NSLog(@"TrackHook: ⚠️ 未在UI中找到距离信息");
     }
     
     return foundDistance;
 }
 
 %new
+- (void)debugLogCurrentDataState {
+    [g_dataLock lock];
+    NSString *uid = [g_currentTargetUid copy];
+    NSString *token = [g_bluedBasicToken copy];
+    double lat = g_currentLat;
+    double lng = g_currentLng;
+    [g_dataLock unlock];
+    
+    NSLog(@"TrackHook: 📊 当前数据状态:");
+    NSLog(@"TrackHook:   UID: %@", uid ?: @"<空>");
+    NSLog(@"TrackHook:   Token: %@", token ? @"<已获取>" : @"<空>");
+    NSLog(@"TrackHook:   坐标: (%.6f, %.6f)", lat, lng);
+}
+
+%new
 - (void)th_addBtn {
-    NSLog(@"TrackHook: th_addBtn 被调用");
+    NSLog(@"TrackHook: 🎨 th_addBtn 被调用");
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self th_addBtn]; });
         return;
     }
     UIWindow *win = [self th_getSafeKeyWindow];
     if (!win) {
-        NSLog(@"TrackHook: 未找到 KeyWindow");
+        NSLog(@"TrackHook: ❌ 未找到 KeyWindow");
         return;
     }
     if ([win viewWithTag:TRACK_BTN_TAG]) {
-        NSLog(@"TrackHook: 按钮已存在");
+        NSLog(@"TrackHook: ⚠️ 按钮已存在");
         return;
     }
 
@@ -419,7 +420,7 @@ static double g_initialDistance = -1.0;
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
     [btn addGestureRecognizer:pan];
     [win addSubview:btn];
-    NSLog(@"TrackHook: 悬浮按钮已添加到窗口");
+    NSLog(@"TrackHook: ✅ 悬浮按钮已添加到窗口");
 }
 
 %new
@@ -464,6 +465,7 @@ static double g_initialDistance = -1.0;
         lab.center = CGPointMake(win.bounds.size.width / 2, win.bounds.size.height * 0.85);
         
         [win addSubview:lab];
+        lab.alpha = 0;
         [UIView animateWithDuration:0.3 animations:^{ lab.alpha = 1.0; }];
         [UIView animateWithDuration:0.3 delay:dur options:0 animations:^{ lab.alpha = 0; } completion:^(BOOL finished) { 
             if (finished) [lab removeFromSuperview]; 
@@ -474,14 +476,14 @@ static double g_initialDistance = -1.0;
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     NSString *clsName = NSStringFromClass([self class]);
-    NSLog(@"TrackHook: viewDidAppear 被调用，当前控制器: %@", clsName);
+    NSLog(@"TrackHook: 🏃 viewDidAppear - 控制器: %@", clsName);
     
     NSArray *targetKeywords = @[@"Detail", @"User", @"Profile", @"Homepage", @"Info", @"HomePage", @"PersonData", @"HomeView"];
     BOOL shouldInject = NO;
     for (NSString *keyword in targetKeywords) {
         if ([clsName containsString:keyword]) {
             shouldInject = YES;
-            NSLog(@"TrackHook: 页面类名包含关键字 '%@'，将注入按钮", keyword);
+            NSLog(@"TrackHook: ✅ 页面匹配关键字 '%@'，将注入按钮", keyword);
             break;
         }
     }
@@ -495,7 +497,7 @@ static double g_initialDistance = -1.0;
         UIView *btn = [win viewWithTag:TRACK_BTN_TAG];
         if (btn) {
             [btn removeFromSuperview];
-            NSLog(@"TrackHook: 从非目标页面移除按钮");
+            NSLog(@"TrackHook: 🗑️ 从非目标页面移除按钮");
         }
     }
 }
@@ -509,18 +511,57 @@ static double g_initialDistance = -1.0;
         NSString *urlString = [request.URL absoluteString];
         NSString *host = request.URL.host;
         
-        // 监听所有发往blued.cn的请求
-        if (host && [host containsString:@"blued.cn"]) {
-            NSLog(@"TrackHook: 监听到Blued请求: %@", urlString);
+        // 监听所有发往blued.cn和相关域的请求
+        if (host && ([host containsString:@"blued.cn"] || [host containsString:@"irisgw.cn"])) {
+            NSLog(@"TrackHook: 🌐 监听到Blued相关请求: %@", urlString);
             
-            // 1. 尝试从URL路径中提取UID
+            // 1. 捕获Basic Token
+            NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
+            if ([auth hasPrefix:@"Basic "]) {
+                NSString *token = [auth substringFromIndex:6];
+                if (token.length > 0) {
+                    [g_dataLock lock];
+                    g_bluedBasicToken = [token copy];
+                    [g_dataLock unlock];
+                    NSLog(@"TrackHook: ✅ 已捕获到 Basic Token");
+                }
+            }
+            
+            // 2. 【关键】从timeline请求中提取坐标
+            if ([urlString containsString:@"/timeline"] && [urlString containsString:@"lat="] && [urlString containsString:@"lot="]) {
+                // 解析查询参数
+                NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
+                NSArray *queryItems = components.queryItems;
+                
+                for (NSURLQueryItem *item in queryItems) {
+                    if ([item.name isEqualToString:@"lat"]) {
+                        double lat = [item.value doubleValue];
+                        if (fabs(lat) > 0.001) {
+                            [g_dataLock lock];
+                            g_currentLat = lat;
+                            [g_dataLock unlock];
+                            NSLog(@"TrackHook: ✅ 从timeline请求捕获纬度: %.6f", lat);
+                        }
+                    } else if ([item.name isEqualToString:@"lot"]) {
+                        double lng = [item.value doubleValue];
+                        if (fabs(lng) > 0.001) {
+                            [g_dataLock lock];
+                            g_currentLng = lng;
+                            [g_dataLock unlock];
+                            NSLog(@"TrackHook: ✅ 从timeline请求捕获经度: %.6f", lng);
+                        }
+                    }
+                }
+            }
+            
+            // 3. 从URL路径中提取UID
             NSArray *uidPatterns = @[
-                @"/users/(\\d+)",                    // /users/54533294
-                @"/user/(\\d+)",                     // /user/54533294
-                @"[?&]uid=(\\d+)",                   // ?uid=54533294
-                @"[?&]user_id=(\\d+)",               // ?user_id=54533294
-                @"[?&]target_uid=(\\d+)",            // ?target_uid=54533294
-                @"[?&]userId=(\\d+)"                 // ?userId=54533294
+                @"/users/(\\d+)",                    // /users/90619861
+                @"/user/(\\d+)",                     // /user/90619861
+                @"[?&]uid=(\\d+)",                   // ?uid=90619861
+                @"[?&]user_id=(\\d+)",               // ?user_id=90619861
+                @"[?&]target_uid=(\\d+)",            // ?target_uid=90619861
+                @"[?&]userId=(\\d+)"                 // ?userId=90619861
             ];
             
             for (NSString *pattern in uidPatterns) {
@@ -534,24 +575,12 @@ static double g_initialDistance = -1.0;
                             [g_dataLock lock];
                             g_currentTargetUid = [capturedUid copy];
                             [g_dataLock unlock];
-                            NSLog(@"TrackHook: 从URL模式 '%@' 捕获到 UID: %@", pattern, capturedUid);
+                            NSLog(@"TrackHook: ✅ 从URL模式 '%@' 捕获到 UID: %@", pattern, capturedUid);
                             break;
                         }
                     }
                 } @catch (NSException *e) {
-                    NSLog(@"TrackHook: 正则匹配异常: %@", e);
-                }
-            }
-            
-            // 2. 捕获Basic Token
-            NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
-            if ([auth hasPrefix:@"Basic "]) {
-                NSString *token = [auth substringFromIndex:6];
-                if (token.length > 0) {
-                    [g_dataLock lock];
-                    g_bluedBasicToken = [token copy];
-                    [g_dataLock unlock];
-                    NSLog(@"TrackHook: 已捕获到 Basic Token (长度: %lu)", (unsigned long)token.length);
+                    NSLog(@"TrackHook: ⚠️ 正则匹配异常: %@", e);
                 }
             }
         }
@@ -562,7 +591,7 @@ static double g_initialDistance = -1.0;
 %end
 
 %ctor {
-    NSLog(@"TrackHook: 插件已加载 (Constructor)");
+    NSLog(@"TrackHook: 🚀 插件已加载 (Constructor)");
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         g_dataLock = [[NSLock alloc] init];
