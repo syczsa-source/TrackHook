@@ -11,14 +11,27 @@ static double g_currentLat = 0.0;
 static double g_currentLng = 0.0;
 static double g_targetDistance = -1.0;
 
-@interface UIViewController (TrackHook)
+// ==================== 添加：类别方法声明 ====================
+// 这是修复编译错误的关键：声明UIViewController的类别方法
+@interface UIViewController (TrackHookMethods)
+- (NSString *)extractUserIdFromUI;
+- (NSString *)findUserIdInShareSheet;
+- (NSString *)findUserIdInProfilePage;
+- (NSString *)findUserIdGlobally;
+- (void)debugLogCurrentDataState;
 - (UIWindow *)th_getSafeKeyWindow;
 - (void)th_onBtnClick;
 - (void)th_addBtn;
 - (void)th_handlePan:(UIPanGestureRecognizer *)pan;
 - (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
-- (void)debugLogCurrentDataState;
 @end
+
+// 声明NSURLSession的类别方法
+@interface NSURLSession (TrackHookMethods)
+- (void)extractDistanceFromJSON:(NSDictionary *)json;
+- (void)deepSearchDistanceInObject:(id)obj;
+@end
+// ==================== 类别声明结束 ====================
 
 %hook UIViewController
 
@@ -121,9 +134,6 @@ static double g_targetDistance = -1.0;
 
 %new
 - (NSString *)findUserIdInShareSheet {
-    // 分享界面通常是一个UIAlertController或UIActivityViewController
-    // 我们可以通过递归查找文本
-    
     __block NSString *foundUid = nil;
     UIWindow *keyWindow = [self th_getSafeKeyWindow];
     
@@ -135,7 +145,6 @@ static double g_targetDistance = -1.0;
     weakSearchBlock = searchBlock = ^(UIView *view) {
         if (!view || foundUid) return;
         
-        // 检查是否是UILabel或UITextView
         if ([view isKindOfClass:[UILabel class]] || [view isKindOfClass:[UITextView class]]) {
             NSString *text = nil;
             if ([view isKindOfClass:[UILabel class]]) {
@@ -145,7 +154,6 @@ static double g_targetDistance = -1.0;
             }
             
             if (text && text.length > 0) {
-                // 查找用户ID模式
                 NSArray *patterns = @[
                     @"ID[:：]\\s*(\\d+)",      // ID: 478940426
                     @"ID\\s*(\\d+)",           // ID478940426
@@ -166,7 +174,7 @@ static double g_targetDistance = -1.0;
                                                                           range:NSMakeRange(0, text.length)];
                         if (match) {
                             NSString *uid = [text substringWithRange:[match rangeAtIndex:1]];
-                            if (uid.length >= 6) { // 假设UID至少6位
+                            if (uid.length >= 6) {
                                 foundUid = uid;
                                 NSLog(@"TrackHook: 🔍 在分享界面找到用户ID: %@ (模式: %@)", uid, pattern);
                                 return;
@@ -177,7 +185,6 @@ static double g_targetDistance = -1.0;
             }
         }
         
-        // 递归搜索子视图
         for (UIView *subview in view.subviews) {
             if (weakSearchBlock) {
                 weakSearchBlock(subview);
@@ -186,10 +193,8 @@ static double g_targetDistance = -1.0;
         }
     };
     
-    // 从当前视图控制器开始搜索
     searchBlock(self.view);
     
-    // 如果当前视图控制器没有，搜索整个窗口
     if (!foundUid) {
         searchBlock(keyWindow);
     }
@@ -199,9 +204,6 @@ static double g_targetDistance = -1.0;
 
 %new
 - (NSString *)findUserIdInProfilePage {
-    // 在个人主页查找用户ID
-    // 根据您提供的截图，页面底部有"ID:478940426"
-    
     __block NSString *foundUid = nil;
     
     __block void (^__weak weakSearchBlock)(UIView *);
@@ -215,9 +217,7 @@ static double g_targetDistance = -1.0;
             NSString *text = label.text;
             
             if (text && text.length > 0) {
-                // 检查是否包含"ID:"
                 if ([text containsString:@"ID:"]) {
-                    // 提取数字
                     NSError *error = nil;
                     NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"ID[:：]\\s*(\\d+)" 
                                                                                            options:NSRegularExpressionCaseInsensitive 
@@ -251,9 +251,6 @@ static double g_targetDistance = -1.0;
 
 %new
 - (NSString *)findUserIdGlobally {
-    // 全局搜索用户ID
-    // 这个方法会搜索整个窗口的UI元素
-    
     __block NSString *foundUid = nil;
     UIWindow *keyWindow = [self th_getSafeKeyWindow];
     
@@ -270,7 +267,6 @@ static double g_targetDistance = -1.0;
             NSString *text = label.text;
             
             if (text && text.length > 0) {
-                // 使用正则表达式查找6位以上的数字
                 NSError *error = nil;
                 NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\d{6,}" 
                                                                                        options:0 
@@ -281,10 +277,7 @@ static double g_targetDistance = -1.0;
                                                                      range:NSMakeRange(0, text.length)];
                     if (match) {
                         NSString *uid = [text substringWithRange:match.range];
-                        // 验证这个数字是否可能是用户ID
-                        // 通常用户ID是6-9位数字
                         if (uid.length >= 6 && uid.length <= 9) {
-                            // 检查上下文，避免匹配到其他数字（如时间、距离等）
                             NSString *context = text.lowercaseString;
                             if (![context containsString:@"km"] && 
                                 ![context containsString:@"m"] && 
@@ -294,8 +287,8 @@ static double g_targetDistance = -1.0;
                                 ![context containsString:@"年"] &&
                                 ![context containsString:@"月"] &&
                                 ![context containsString:@"日"] &&
-                                ![context containsString:@":"] &&  // 避免匹配时间
-                                ![context containsString:@"."]) {  // 避免匹配IP地址
+                                ![context containsString:@":"] &&
+                                ![context containsString:@"."]) {
                                 foundUid = uid;
                                 NSLog(@"TrackHook: 🔍 全局搜索找到用户ID: %@", foundUid);
                                 return;
@@ -375,7 +368,6 @@ static double g_targetDistance = -1.0;
     v.center = CGPointMake(v.center.x + translation.x, v.center.y + translation.y);
     [pan setTranslation:CGPointZero inView:v.superview];
     
-    // 限制在窗口内
     CGFloat margin = 28;
     CGRect safeArea = v.superview.bounds;
     v.center = CGPointMake(MAX(margin, MIN(safeArea.size.width - margin, v.center.x)),
@@ -417,9 +409,8 @@ static double g_targetDistance = -1.0;
     });
 }
 
-// 【关键修复点】：这里必须传递 animated 参数
 - (void)viewDidAppear:(BOOL)animated {
-    %orig(animated);  // ✅ 修复：传递 animated 参数
+    %orig(animated);
     
     NSString *clsName = NSStringFromClass([self class]);
     
@@ -450,19 +441,16 @@ static double g_targetDistance = -1.0;
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *res, NSError *err))completionHandler {
     
     void (^customCompletionHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-        // 1. 先执行原始回调
         if (completionHandler) {
             completionHandler(data, response, error);
         }
         
-        // 2. 我们的处理逻辑
         if (!error && data && request) {
             NSString *urlString = [request.URL absoluteString];
             NSString *host = request.URL.host;
             
             if (host && ([host containsString:@"blued.cn"] || [host containsString:@"irisgw.cn"])) {
                 
-                // === 捕获 Basic Token ===
                 NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
                 if ([auth hasPrefix:@"Basic "]) {
                     NSString *token = [auth substringFromIndex:6];
@@ -474,7 +462,6 @@ static double g_targetDistance = -1.0;
                     }
                 }
                 
-                // === 从 timeline 请求中提取坐标 ===
                 if ([urlString containsString:@"/timeline"] || [urlString containsString:@"lat="]) {
                     NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
                     for (NSURLQueryItem *item in components.queryItems) {
@@ -498,20 +485,17 @@ static double g_targetDistance = -1.0;
                     }
                 }
                 
-                // === 从网络响应中提取距离信息 ===
                 @try {
                     NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
                     if (json) {
                         [self extractDistanceFromJSON:json];
                     }
                 } @catch (NSException *exception) {
-                    // 忽略解析错误
                 }
             }
         }
     };
     
-    // 调用原始方法
     NSURLSessionDataTask *task = %orig(request, customCompletionHandler);
     return task;
 }
@@ -520,7 +504,6 @@ static double g_targetDistance = -1.0;
 - (void)extractDistanceFromJSON:(NSDictionary *)json {
     if (!json) return;
     
-    // 深度搜索距离信息
     [self deepSearchDistanceInObject:json];
 }
 
@@ -531,7 +514,6 @@ static double g_targetDistance = -1.0;
     if ([obj isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)obj;
         
-        // 检查是否有距离字段
         for (NSString *key in @[@"distance", @"dis", @"range"]) {
             id value = dict[key];
             if (value && [value isKindOfClass:[NSNumber class]]) {
@@ -546,7 +528,6 @@ static double g_targetDistance = -1.0;
             }
         }
         
-        // 检查 location 字段
         id location = dict[@"location"];
         if (location && [location isKindOfClass:[NSString class]]) {
             NSString *locationStr = (NSString *)location;
@@ -563,7 +544,6 @@ static double g_targetDistance = -1.0;
             }
         }
         
-        // 递归搜索
         for (id value in [dict allValues]) {
             [self deepSearchDistanceInObject:value];
         }
