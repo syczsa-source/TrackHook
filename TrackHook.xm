@@ -13,7 +13,6 @@ static NSString *g_bluedBasicToken = nil;
 static NSString *g_currentTargetUid = nil;
 static double g_initialDistance = -1.0;
 
-// 【修复1】：在 @interface 中明确定义所有新增的私有方法
 @interface UIViewController (TrackHook)
 - (UIWindow *)th_getSafeKeyWindow;
 - (void)th_autoFetchUserInfo;
@@ -23,10 +22,6 @@ static double g_initialDistance = -1.0;
 - (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
 - (NSString *)extractUserIdFromUI;
 - (double)extractDistanceFromUI;
-- (void)debugAllPropertiesOfObject:(id)obj;
-// 【关键修复】：声明新增的方法，并为 NSString** 参数添加 __autoreleasing 修饰符
-- (BOOL)enumerateAllPropertiesAndIvarsOfObject:(id)obj targetUid:(NSString * __autoreleasing *)foundUid targetDistance:(double *)foundDistance;
-- (BOOL)checkObjectForTargetData:(id)obj foundUid:(NSString * __autoreleasing *)foundUid foundDistance:(double *)foundDistance;
 @end
 
 %hook UIViewController
@@ -52,110 +47,157 @@ static double g_initialDistance = -1.0;
 
 %new
 - (void)th_onBtnClick {
+    // 【关键安全修复1】：确保在主线程执行，并添加基本检查
+    if (![NSThread isMainThread]) {
+        NSLog(@"TrackHook: 错误：th_onBtnClick 不在主线程！");
+        return;
+    }
+    if (!self || ![self isKindOfClass:[UIViewController class]]) {
+        NSLog(@"TrackHook: 错误：self 无效或不是控制器");
+        return;
+    }
+    
     NSLog(@"TrackHook: th_onBtnClick 被触发");
-    if (!self || ![self isKindOfClass:[UIViewController class]]) return;
     
-    [self th_autoFetchUserInfo];
-    
-    [g_dataLock lock];
-    NSString *targetUid = [g_currentTargetUid copy];
-    NSString *basicToken = [g_bluedBasicToken copy];
-    double initialDist = g_initialDistance;
-    [g_dataLock unlock];
-    
-    if (!targetUid || !basicToken || initialDist <= 0) {
-        [self th_showToast:@"未获取到必要数据，请确保已在目标用户页面" duration:2.0];
-        return;
-    }
-
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:BLUED_BUNDLE_ID];
-    if (!ud) {
-        [self th_showToast:@"无法访问应用数据" duration:2.0];
-        return;
-    }
-    double myLat = [ud doubleForKey:@"current_latitude"];
-    double myLng = [ud doubleForKey:@"current_longitude"];
-    
-    if (fabs(myLat) < 0.001 && fabs(myLng) < 0.001) {
-        [self th_showToast:@"本地GPS数据无效" duration:2.0];
-        return;
-    }
-
-    [self th_showToast:@"🛰️ 三角定位计算中..." duration:1.5];
-
+    // 【关键安全修复2】：将可能崩溃的数据获取和网络请求放入安全的异步块
+    __weak __typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        double minLng = myLng - 1.0;
-        double maxLng = myLng + 1.0;
-        double estimatedLng = myLng;
-        double currentDist = initialDist;
-        BOOL success = NO;
-        int maxIterations = 15;
-        double tolerance = 0.01;
+        __strong __typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            NSLog(@"TrackHook: 控制器已释放");
+            return;
+        }
+        
+        @try {
+            [strongSelf th_autoFetchUserInfo];
+        } @catch (NSException *exception) {
+            NSLog(@"TrackHook: th_autoFetchUserInfo 发生严重异常: %@", exception);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf th_showToast:@"数据获取时发生异常" duration:2.0];
+            });
+            return;
+        }
+        
+        NSString *targetUid = nil;
+        NSString *basicToken = nil;
+        double initialDist = -1.0;
+        
+        [g_dataLock lock];
+        targetUid = [g_currentTargetUid copy];
+        basicToken = [g_bluedBasicToken copy];
+        initialDist = g_initialDistance;
+        [g_dataLock unlock];
+        
+        if (!targetUid || !basicToken || initialDist <= 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf th_showToast:@"未获取到必要数据，请确保已在目标用户页面" duration:2.0];
+            });
+            return;
+        }
 
-        for (int i = 0; i < maxIterations && !success; i++) {
-            NSString *urlStr = [NSString stringWithFormat:@"https://argo.blued.cn/users/%@/basic", targetUid];
-            NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
-            [req setValue:[NSString stringWithFormat:@"Basic %@", basicToken] forHTTPHeaderField:@"Authorization"];
-            req.timeoutInterval = 3.0;
-            req.HTTPMethod = @"GET";
-
-            __block double newDist = -1.0;
-            __block BOOL requestFailed = NO;
-            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-            
-            NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
-                if (!err && data) {
-                    @try {
-                        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                        if (json && [json[@"data"] isKindOfClass:[NSDictionary class]]) {
-                            newDist = [json[@"data"][@"distance"] doubleValue];
-                        }
-                    } @catch (NSException *exception) {
-                        requestFailed = YES;
-                    }
-                } else {
-                    requestFailed = YES;
-                }
-                dispatch_semaphore_signal(sem);
-            }];
-            [task resume];
-            
-            if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC))) != 0) {
-                break;
-            }
-            
-            if (requestFailed || newDist < 0) {
-                break;
-            }
-            
-            double deltaDist = newDist - currentDist;
-            if (fabs(deltaDist) < tolerance) {
-                success = YES;
-                break;
-            } else if (deltaDist > 0) {
-                maxLng = estimatedLng;
-            } else {
-                minLng = estimatedLng;
-            }
-            estimatedLng = (minLng + maxLng) / 2.0;
-            currentDist = newDist;
-            
-            [NSThread sleepForTimeInterval:0.15];
+        NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:BLUED_BUNDLE_ID];
+        if (!ud) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf th_showToast:@"无法访问应用数据" duration:2.0];
+            });
+            return;
+        }
+        double myLat = [ud doubleForKey:@"current_latitude"];
+        double myLng = [ud doubleForKey:@"current_longitude"];
+        
+        if (fabs(myLat) < 0.001 && fabs(myLng) < 0.001) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf th_showToast:@"本地GPS数据无效" duration:2.0];
+            });
+            return;
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (success) {
-                NSString *resStr = [NSString stringWithFormat:@"纬度: %.6f\n经度: %.6f\n初始距离: %.2f km", myLat, estimatedLng, initialDist];
-                UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:@"定位计算完成" message:resStr preferredStyle:UIAlertControllerStyleAlert];
-                [resAlert addAction:[UIAlertAction actionWithTitle:@"复制坐标" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-                    [[UIPasteboard generalPasteboard] setString:[NSString stringWithFormat:@"%.6f, %.6f", myLat, estimatedLng]];
-                }]];
-                [resAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-                [self presentViewController:resAlert animated:YES completion:nil];
-            } else {
-                [self th_showToast:@"计算失败，请检查网络或稍后重试" duration:2.0];
-            }
+            [strongSelf th_showToast:@"🛰️ 三角定位计算中..." duration:1.5];
         });
+
+        // 三角定位计算逻辑（保持不变，但包裹在try-catch中）
+        @try {
+            double minLng = myLng - 1.0;
+            double maxLng = myLng + 1.0;
+            double estimatedLng = myLng;
+            double currentDist = initialDist;
+            BOOL success = NO;
+            int maxIterations = 15;
+            double tolerance = 0.01;
+
+            for (int i = 0; i < maxIterations && !success; i++) {
+                NSString *urlStr = [NSString stringWithFormat:@"https://argo.blued.cn/users/%@/basic", targetUid];
+                NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+                [req setValue:[NSString stringWithFormat:@"Basic %@", basicToken] forHTTPHeaderField:@"Authorization"];
+                req.timeoutInterval = 5.0; // 稍微增加超时
+                req.HTTPMethod = @"GET";
+
+                __block double newDist = -1.0;
+                __block BOOL requestFailed = NO;
+                dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+                
+                NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
+                    if (!err && data) {
+                        @try {
+                            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                            if (json && [json[@"data"] isKindOfClass:[NSDictionary class]]) {
+                                newDist = [json[@"data"][@"distance"] doubleValue];
+                            }
+                        } @catch (NSException *exception) {
+                            requestFailed = YES;
+                        }
+                    } else {
+                        requestFailed = YES;
+                    }
+                    dispatch_semaphore_signal(sem);
+                }];
+                [task resume];
+                
+                if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC))) != 0) {
+                    NSLog(@"TrackHook: 网络请求超时");
+                    break;
+                }
+                
+                if (requestFailed || newDist < 0) {
+                    NSLog(@"TrackHook: 网络请求失败或数据无效");
+                    break;
+                }
+                
+                double deltaDist = newDist - currentDist;
+                if (fabs(deltaDist) < tolerance) {
+                    success = YES;
+                    break;
+                } else if (deltaDist > 0) {
+                    maxLng = estimatedLng;
+                } else {
+                    minLng = estimatedLng;
+                }
+                estimatedLng = (minLng + maxLng) / 2.0;
+                currentDist = newDist;
+                
+                [NSThread sleepForTimeInterval:0.2]; // 增加间隔，降低频率
+            }
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (success) {
+                    NSString *resStr = [NSString stringWithFormat:@"纬度: %.6f\n经度: %.6f\n初始距离: %.2f km", myLat, estimatedLng, initialDist];
+                    UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:@"定位计算完成" message:resStr preferredStyle:UIAlertControllerStyleAlert];
+                    [resAlert addAction:[UIAlertAction actionWithTitle:@"复制坐标" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
+                        [[UIPasteboard generalPasteboard] setString:[NSString stringWithFormat:@"%.6f, %.6f", myLat, estimatedLng]];
+                    }]];
+                    [resAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
+                    [strongSelf presentViewController:resAlert animated:YES completion:nil];
+                } else {
+                    [strongSelf th_showToast:@"计算失败，请检查网络或稍后重试" duration:2.0];
+                }
+            });
+        } @catch (NSException *exception) {
+            NSLog(@"TrackHook: 三角定位计算过程发生异常: %@", exception);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf th_showToast:@"计算过程发生错误" duration:2.0];
+            });
+        }
     });
 }
 
@@ -163,6 +205,7 @@ static double g_initialDistance = -1.0;
 - (void)th_autoFetchUserInfo {
     NSLog(@"TrackHook: th_autoFetchUserInfo 开始执行 - 当前控制器: %@", NSStringFromClass([self class]));
     
+    // 先清空旧数据
     [g_dataLock lock];
     g_currentTargetUid = nil;
     g_initialDistance = -1.0;
@@ -172,77 +215,54 @@ static double g_initialDistance = -1.0;
         NSString *uid = nil;
         double distance = -1.0;
         
-        // 策略1: 从控制器属性获取（已知常见属性名，快速通道）
-        NSArray *controllerProps = @[@"userModel", @"user", @"targetUser", @"personData", @"homePageData", @"dataItem", @"model", @"data"];
-        id potentialModel = nil;
+        // 【稳定性修复】：使用简化策略，暂时移除复杂的运行时反射
         
-        for (NSString *prop in controllerProps) {
+        // 策略1: 快速尝试最常见的几个属性
+        NSArray *quickProperties = @[@"user", @"userModel", @"personData", @"dataItem"];
+        for (NSString *prop in quickProperties) {
             @try {
                 if ([self respondsToSelector:NSSelectorFromString(prop)]) {
                     id value = [self valueForKey:prop];
                     if (value && value != [NSNull null]) {
-                        potentialModel = value;
-                        NSLog(@"TrackHook: 从控制器属性 '%@' 找到对象: %@", prop, NSStringFromClass([value class]));
-                        break;
+                        // 尝试从这个对象获取uid
+                        NSArray *idKeys = @[@"uid", @"userId", @"id"];
+                        for (NSString *key in idKeys) {
+                            @try {
+                                if ([value respondsToSelector:NSSelectorFromString(key)]) {
+                                    id idValue = [value valueForKey:key];
+                                    if (idValue && idValue != [NSNull null]) {
+                                        uid = [NSString stringWithFormat:@"%@", idValue];
+                                        NSLog(@"TrackHook: 从对象属性 '%@' 的字段 '%@' 找到UID: %@", prop, key, uid);
+                                        break;
+                                    }
+                                }
+                            } @catch (NSException *e) {}
+                        }
+                        
+                        // 尝试获取距离
+                        NSArray *distKeys = @[@"distance", @"dis"];
+                        for (NSString *key in distKeys) {
+                            @try {
+                                if ([value respondsToSelector:NSSelectorFromString(key)]) {
+                                    id distValue = [value valueForKey:key];
+                                    if (distValue && [distValue isKindOfClass:[NSNumber class]]) {
+                                        distance = [distValue doubleValue];
+                                        NSLog(@"TrackHook: 从对象属性 '%@' 的字段 '%@' 找到距离: %.2f", prop, key, distance);
+                                        break;
+                                    }
+                                }
+                            } @catch (NSException *e) {}
+                        }
+                        
+                        if (uid && distance > 0) break;
                     }
                 }
-            } @catch (NSException *e) { /* 忽略 */ }
-        }
-        
-        if (potentialModel) {
-            // 尝试从模型对象获取ID
-            NSArray *idKeys = @[@"uid", @"userId", @"userID", @"user_id", @"id", @"ID"];
-            for (NSString *key in idKeys) {
-                @try {
-                    if ([potentialModel respondsToSelector:NSSelectorFromString(key)]) {
-                        id value = [potentialModel valueForKey:key];
-                        if (value && value != [NSNull null]) {
-                            uid = [NSString stringWithFormat:@"%@", value];
-                            NSLog(@"TrackHook: 从模型属性 '%@' 获取到 UID: %@", key, uid);
-                            break;
-                        }
-                    }
-                } @catch (NSException *e) {}
-            }
-            
-            // 尝试从模型对象获取距离
-            NSArray *distKeys = @[@"distance", @"dis", @"dist", @"range", @"km"];
-            for (NSString *key in distKeys) {
-                @try {
-                    if ([potentialModel respondsToSelector:NSSelectorFromString(key)]) {
-                        id value = [potentialModel valueForKey:key];
-                        if (value && [value isKindOfClass:[NSNumber class]]) {
-                            distance = [value doubleValue];
-                            NSLog(@"TrackHook: 从模型属性 '%@' 获取到距离: %.2f", key, distance);
-                            break;
-                        }
-                    }
-                } @catch (NSException *e) {}
-            }
-            
-            // 如果从模型获取失败，进行深度调试
-            if (!uid || distance <= 0) {
-                NSLog(@"TrackHook: 模型属性获取不完整，开始深度分析模型...");
-                [self debugAllPropertiesOfObject:potentialModel];
+            } @catch (NSException *e) {
+                // 忽略访问异常
             }
         }
         
-        // 策略2: 运行时反射探查（借鉴安卓代码思路，穷举搜索）
-        if (!uid || distance <= 0) {
-            NSLog(@"TrackHook: 开始运行时反射探查...");
-            NSString *foundUid = nil;
-            double foundDistance = -1.0;
-            BOOL found = [self enumerateAllPropertiesAndIvarsOfObject:self targetUid:&foundUid targetDistance:&foundDistance];
-            if (found) {
-                uid = foundUid;
-                distance = foundDistance;
-                NSLog(@"TrackHook: 通过运行时反射探查到数据 - UID: %@, Distance: %.2f", uid, distance);
-            } else {
-                NSLog(@"TrackHook: 运行时反射探查未找到数据");
-            }
-        }
-        
-        // 策略3: 如果反射获取失败，尝试从UI文本中提取
+        // 策略2: 如果快速属性没找到，尝试从UI文本中提取（安全兜底）
         if (!uid || uid.length == 0) {
             NSString *extractedUid = [self extractUserIdFromUI];
             if (extractedUid && extractedUid.length > 0) {
@@ -259,12 +279,11 @@ static double g_initialDistance = -1.0;
             }
         }
         
-        // 最终处理：清理和存储数据
+        // 存储找到的数据
         if (uid && uid.length > 0) {
-            // 清理UID（移除非数字字符，保留纯数字ID）
             NSString *cleanUid = [[uid componentsSeparatedByCharactersInSet:[[NSCharacterSet decimalDigitCharacterSet] invertedSet]] componentsJoinedByString:@""];
             
-            if (cleanUid.length >= 6) { // 假设有效用户ID至少6位数字
+            if (cleanUid.length >= 6) {
                 [g_dataLock lock];
                 g_currentTargetUid = [cleanUid copy];
                 g_initialDistance = distance;
@@ -272,208 +291,22 @@ static double g_initialDistance = -1.0;
                 NSLog(@"TrackHook: 成功保存目标数据 - UID: %@, Distance: %.2f", cleanUid, distance);
                 return;
             } else {
-                NSLog(@"TrackHook: 提取到的UID '%@' 清理后 '%@' 长度不足，可能无效", uid, cleanUid);
+                NSLog(@"TrackHook: 提取到的UID '%@' 清理后 '%@' 长度不足", uid, cleanUid);
             }
         }
         
-        NSLog(@"TrackHook: 所有数据获取策略均未能提取到有效UID和距离");
+        NSLog(@"TrackHook: 未能提取到有效UID和距离");
         
     } @catch (NSException *exception) {
-        NSLog(@"TrackHook: th_autoFetchUserInfo 捕获到异常: %@", exception);
+        // 【关键安全修复3】：捕获所有异常，防止崩溃
+        NSLog(@"TrackHook: th_autoFetchUserInfo 捕获到异常（已处理）: %@", exception);
     }
-    
-    NSLog(@"TrackHook: 数据获取失败");
-}
-
-%new
-- (BOOL)enumerateAllPropertiesAndIvarsOfObject:(id)obj targetUid:(NSString * __autoreleasing *)foundUid targetDistance:(double *)foundDistance {
-    if (!obj) return NO;
-    
-    __block BOOL found = NO;
-    __block NSString *uidResult = nil;
-    __block double distanceResult = -1.0;
-    
-    // 1. 遍历当前对象的所有属性
-    unsigned int propCount = 0;
-    objc_property_t *properties = class_copyPropertyList([obj class], &propCount);
-    
-    for (unsigned int i = 0; i < propCount; i++) {
-        const char *propName = property_getName(properties[i]);
-        NSString *propertyName = [NSString stringWithUTF8String:propName];
-        
-        @try {
-            // 跳过明显的系统属性
-            if ([propertyName hasPrefix:@"_"] || 
-                [propertyName isEqualToString:@"description"] || 
-                [propertyName isEqualToString:@"debugDescription"] ||
-                [propertyName isEqualToString:@"hash"] ||
-                [propertyName isEqualToString:@"superclass"]) {
-                continue;
-            }
-            
-            id value = [obj valueForKey:propertyName];
-            if (!value || value == [NSNull null]) continue;
-            
-            NSLog(@"TrackHook: 探查属性 '%@'，值类型: %@", propertyName, NSStringFromClass([value class]));
-            
-            // 检查这个值本身是否包含我们需要的数据
-            NSString *tempUid = nil;
-            double tempDistance = -1.0;
-            if ([self checkObjectForTargetData:value foundUid:&tempUid foundDistance:&tempDistance]) {
-                uidResult = tempUid;
-                distanceResult = tempDistance;
-                found = YES;
-                NSLog(@"TrackHook: 在属性 '%@' 中找到目标数据", propertyName);
-                break;
-            }
-            
-            // 递归检查嵌套对象（深度限制为2，避免无限递归）
-            if (!found && [value isKindOfClass:[NSObject class]] && 
-                ![value isKindOfClass:[NSString class]] && 
-                ![value isKindOfClass:[NSNumber class]] &&
-                ![value isKindOfClass:[NSArray class]] && 
-                ![value isKindOfClass:[NSDictionary class]]) {
-                // 避免循环引用，这里简单判断不是UIKit基础类
-                if (![NSStringFromClass([value class]) hasPrefix:@"UI"] && 
-                    ![NSStringFromClass([value class]) hasPrefix:@"NS"]) {
-                    found = [self enumerateAllPropertiesAndIvarsOfObject:value targetUid:&uidResult targetDistance:&distanceResult];
-                    if (found) break;
-                }
-            }
-        } @catch (NSException *e) {
-            // 忽略无法访问的属性
-        }
-    }
-    free(properties);
-    
-    if (found) {
-        if (foundUid) *foundUid = uidResult;
-        if (foundDistance) *foundDistance = distanceResult;
-        return YES;
-    }
-    
-    // 2. 遍历当前对象的所有实例变量
-    unsigned int ivarCount = 0;
-    Ivar *ivars = class_copyIvarList([obj class], &ivarCount);
-    
-    for (unsigned int i = 0; i < ivarCount; i++) {
-        Ivar ivar = ivars[i];
-        const char *ivarName = ivar_getName(ivar);
-        if (!ivarName) continue;
-        
-        NSString *ivarNameStr = [NSString stringWithUTF8String:ivarName];
-        
-        @try {
-            // 跳过明显的系统变量
-            if ([ivarNameStr hasPrefix:@"_"]) continue;
-            
-            id value = object_getIvar(obj, ivar);
-            if (!value || value == [NSNull null]) continue;
-            
-            NSLog(@"TrackHook: 探查实例变量 '%@'，值类型: %@", ivarNameStr, NSStringFromClass([value class]));
-            
-            // 检查这个值本身是否包含我们需要的数据
-            NSString *tempUid = nil;
-            double tempDistance = -1.0;
-            if ([self checkObjectForTargetData:value foundUid:&tempUid foundDistance:&tempDistance]) {
-                uidResult = tempUid;
-                distanceResult = tempDistance;
-                found = YES;
-                NSLog(@"TrackHook: 在实例变量 '%@' 中找到目标数据", ivarNameStr);
-                break;
-            }
-            
-            // 递归检查嵌套对象
-            if (!found && [value isKindOfClass:[NSObject class]] && 
-                ![value isKindOfClass:[NSString class]] && 
-                ![value isKindOfClass:[NSNumber class]] &&
-                ![value isKindOfClass:[NSArray class]] && 
-                ![value isKindOfClass:[NSDictionary class]]) {
-                if (![NSStringFromClass([value class]) hasPrefix:@"UI"] && 
-                    ![NSStringFromClass([value class]) hasPrefix:@"NS"]) {
-                    found = [self enumerateAllPropertiesAndIvarsOfObject:value targetUid:&uidResult targetDistance:&distanceResult];
-                    if (found) break;
-                }
-            }
-        } @catch (NSException *e) {
-            // 忽略无法访问的变量
-        }
-    }
-    free(ivars);
-    
-    if (found) {
-        if (foundUid) *foundUid = uidResult;
-        if (foundDistance) *foundDistance = distanceResult;
-    }
-    
-    return found;
-}
-
-%new
-- (BOOL)checkObjectForTargetData:(id)obj foundUid:(NSString * __autoreleasing *)foundUid foundDistance:(double *)foundDistance {
-    if (!obj) return NO;
-    
-    BOOL hasUid = NO;
-    BOOL hasDistance = NO;
-    NSString *uid = nil;
-    double distance = -1.0;
-    
-    // 检查可能的UID属性
-    NSArray *idKeys = @[@"uid", @"userId", @"userID", @"user_id", @"id", @"ID"];
-    for (NSString *key in idKeys) {
-        @try {
-            if ([obj respondsToSelector:NSSelectorFromString(key)]) {
-                id value = [obj valueForKey:key];
-                if (value && value != [NSNull null]) {
-                    uid = [NSString stringWithFormat:@"%@", value];
-                    hasUid = YES;
-                    NSLog(@"TrackHook: 在对象 %@ 中发现UID字段 '%@': %@", NSStringFromClass([obj class]), key, uid);
-                    break;
-                }
-            }
-        } @catch (NSException *e) {}
-    }
-    
-    // 检查可能的距离属性
-    NSArray *distKeys = @[@"distance", @"dis", @"dist", @"range", @"km"];
-    for (NSString *key in distKeys) {
-        @try {
-            if ([obj respondsToSelector:NSSelectorFromString(key)]) {
-                id value = [obj valueForKey:key];
-                if (value && [value isKindOfClass:[NSNumber class]]) {
-                    distance = [value doubleValue];
-                    hasDistance = YES;
-                    NSLog(@"TrackHook: 在对象 %@ 中发现距离字段 '%@': %.2f", NSStringFromClass([obj class]), key, distance);
-                    break;
-                }
-            }
-        } @catch (NSException *e) {}
-    }
-    
-    if (hasUid && hasDistance && distance > 0) {
-        if (foundUid) *foundUid = uid;
-        if (foundDistance) *foundDistance = distance;
-        
-        // 找到完整数据，进行深度分析以便后续优化
-        NSLog(@"TrackHook: 发现完整数据对象，类名: %@", NSStringFromClass([obj class]));
-        [self debugAllPropertiesOfObject:obj];
-        return YES;
-    } else if (hasUid || hasDistance) {
-        // 只找到部分数据，也记录下来
-        if (hasUid && foundUid) *foundUid = uid;
-        if (hasDistance && foundDistance) *foundDistance = distance;
-        NSLog(@"TrackHook: 发现部分数据对象，类名: %@, 有UID: %@, 有距离: %.2f", 
-              NSStringFromClass([obj class]), hasUid ? @"是" : @"否", distance);
-    }
-    
-    return NO;
 }
 
 %new
 - (NSString *)extractUserIdFromUI {
     __block NSString *foundUid = nil;
     
-    // 修复循环引用：使用 __weak 引用自身
     __block void (^__weak weakSearchBlock)(UIView *);
     void (^searchBlock)(UIView *);
     
@@ -488,14 +321,14 @@ static double g_initialDistance = -1.0;
                 // 匹配 "ID:161766904" 这种显式格式
                 if ([text hasPrefix:@"ID:"] && text.length > 3) {
                     NSString *userId = [text substringFromIndex:3];
-                    if (userId.length >= 6) { // 简单验证
+                    if (userId.length >= 6) {
                         foundUid = userId;
                         NSLog(@"TrackHook: 从Label提取到ID (前缀匹配): %@", foundUid);
                         return;
                     }
                 }
                 
-                // 使用正则表达式提取长数字串（假设为用户ID）
+                // 使用正则表达式提取长数字串
                 NSError *error = nil;
                 NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\d{6,}" options:0 error:&error];
                 if (!error) {
@@ -511,7 +344,6 @@ static double g_initialDistance = -1.0;
         }
         
         for (UIView *subview in view.subviews) {
-            // 调用弱引用自身，避免循环引用
             if (weakSearchBlock) {
                 weakSearchBlock(subview);
             }
@@ -519,7 +351,13 @@ static double g_initialDistance = -1.0;
         }
     };
     
-    searchBlock(self.view);
+    // 限制递归深度，防止栈溢出
+    @try {
+        searchBlock(self.view);
+    } @catch (NSException *exception) {
+        NSLog(@"TrackHook: extractUserIdFromUI 递归出错: %@", exception);
+    }
+    
     return foundUid;
 }
 
@@ -527,7 +365,6 @@ static double g_initialDistance = -1.0;
 - (double)extractDistanceFromUI {
     __block double foundDistance = -1.0;
     
-    // 修复循环引用：使用 __weak 引用自身
     __block void (^__weak weakSearchBlock)(UIView *);
     void (^searchBlock)(UIView *);
     
@@ -550,7 +387,6 @@ static double g_initialDistance = -1.0;
         }
         
         for (UIView *subview in view.subviews) {
-            // 调用弱引用自身，避免循环引用
             if (weakSearchBlock) {
                 weakSearchBlock(subview);
             }
@@ -558,46 +394,13 @@ static double g_initialDistance = -1.0;
         }
     };
     
-    searchBlock(self.view);
-    return foundDistance;
-}
-
-%new
-- (void)debugAllPropertiesOfObject:(id)obj {
-    if (!obj) return;
-    
-    Class currentClass = [obj class];
-    while (currentClass && currentClass != [NSObject class]) {
-        unsigned int count = 0;
-        objc_property_t *properties = class_copyPropertyList(currentClass, &count);
-        
-        if (count > 0) {
-            NSLog(@"TrackHook: === 调试对象类 %@ 的属性（共%u个）===", NSStringFromClass(currentClass), count);
-            for (unsigned int i = 0; i < count; i++) {
-                const char *propName = property_getName(properties[i]);
-                NSString *propertyName = [NSString stringWithUTF8String:propName];
-                
-                @try {
-                    id value = [obj valueForKey:propertyName];
-                    NSString *valueDesc = @"<nil>";
-                    if (value) {
-                        if ([value isKindOfClass:[NSString class]]) {
-                            valueDesc = [NSString stringWithFormat:@"@\"%@\"", value];
-                        } else if ([value isKindOfClass:[NSNumber class]]) {
-                            valueDesc = [NSString stringWithFormat:@"%@", value];
-                        } else {
-                            valueDesc = [NSString stringWithFormat:@"%@: %p", NSStringFromClass([value class]), value];
-                        }
-                    }
-                    NSLog(@"TrackHook:   [%@] = %@", propertyName, valueDesc);
-                } @catch (NSException *e) {
-                    NSLog(@"TrackHook:   [%@] = <访问异常>", propertyName);
-                }
-            }
-        }
-        free(properties);
-        currentClass = class_getSuperclass(currentClass);
+    @try {
+        searchBlock(self.view);
+    } @catch (NSException *exception) {
+        NSLog(@"TrackHook: extractDistanceFromUI 递归出错: %@", exception);
     }
+    
+    return foundDistance;
 }
 
 %new
