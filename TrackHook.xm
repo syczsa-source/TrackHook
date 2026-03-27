@@ -10,9 +10,9 @@ static NSString *g_currentTargetUid = nil;
 static double g_currentLat = 0.0;
 static double g_currentLng = 0.0;
 static double g_targetDistance = -1.0;
+static UIWindow *g_floatWindow = nil;  // 新增：独立的浮动窗口
 
-// ==================== 添加：类别方法声明 ====================
-// 这是修复编译错误的关键：声明UIViewController的类别方法
+// ==================== 类别方法声明 ====================
 @interface UIViewController (TrackHookMethods)
 - (NSString *)extractUserIdFromUI;
 - (NSString *)findUserIdInShareSheet;
@@ -26,7 +26,6 @@ static double g_targetDistance = -1.0;
 - (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
 @end
 
-// 声明NSURLSession的类别方法
 @interface NSURLSession (TrackHookMethods)
 - (void)extractDistanceFromJSON:(NSDictionary *)json;
 - (void)deepSearchDistanceInObject:(id)obj;
@@ -154,6 +153,9 @@ static double g_targetDistance = -1.0;
             }
             
             if (text && text.length > 0) {
+                // 记录所有扫描到的文本，用于调试
+                NSLog(@"TrackHook: 👀 扫描分享界面文本: '%@'", text);
+                
                 NSArray *patterns = @[
                     @"ID[:：]\\s*(\\d+)",      // ID: 478940426
                     @"ID\\s*(\\d+)",           // ID478940426
@@ -176,7 +178,7 @@ static double g_targetDistance = -1.0;
                             NSString *uid = [text substringWithRange:[match rangeAtIndex:1]];
                             if (uid.length >= 6) {
                                 foundUid = uid;
-                                NSLog(@"TrackHook: 🔍 在分享界面找到用户ID: %@ (模式: %@)", uid, pattern);
+                                NSLog(@"TrackHook: ✅ 在分享界面找到用户ID: %@ (模式: %@)", uid, pattern);
                                 return;
                             }
                         }
@@ -193,11 +195,7 @@ static double g_targetDistance = -1.0;
         }
     };
     
-    searchBlock(self.view);
-    
-    if (!foundUid) {
-        searchBlock(keyWindow);
-    }
+    searchBlock(keyWindow);
     
     return foundUid;
 }
@@ -228,7 +226,7 @@ static double g_targetDistance = -1.0;
                                                                           range:NSMakeRange(0, text.length)];
                         if (match) {
                             foundUid = [text substringWithRange:[match rangeAtIndex:1]];
-                            NSLog(@"TrackHook: 🔍 在个人主页找到用户ID: %@", foundUid);
+                            NSLog(@"TrackHook: ✅ 在个人主页找到用户ID: %@", foundUid);
                             return;
                         }
                     }
@@ -290,7 +288,7 @@ static double g_targetDistance = -1.0;
                                 ![context containsString:@":"] &&
                                 ![context containsString:@"."]) {
                                 foundUid = uid;
-                                NSLog(@"TrackHook: 🔍 全局搜索找到用户ID: %@", foundUid);
+                                NSLog(@"TrackHook: ✅ 全局搜索找到用户ID: %@", foundUid);
                                 return;
                             }
                         }
@@ -331,17 +329,41 @@ static double g_targetDistance = -1.0;
 
 %new
 - (void)th_addBtn {
+    NSLog(@"TrackHook: 🎨 准备添加悬浮按钮");
+    
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self th_addBtn]; });
         return;
     }
-    UIWindow *win = [self th_getSafeKeyWindow];
-    if (!win) return;
-    if ([win viewWithTag:TRACK_BTN_TAG]) return;
-
+    
+    // 1. 创建独立的悬浮窗口（如果不存在）
+    if (!g_floatWindow) {
+        CGRect screenBounds = [UIScreen mainScreen].bounds;
+        
+        // 创建一个透明窗口，不干扰主应用
+        g_floatWindow = [[UIWindow alloc] initWithFrame:screenBounds];
+        g_floatWindow.windowLevel = UIWindowLevelStatusBar + 1;  // 在状态栏之上
+        g_floatWindow.backgroundColor = [UIColor clearColor];  // 透明背景
+        g_floatWindow.userInteractionEnabled = YES;  // 允许交互
+        g_floatWindow.hidden = NO;  // 显示窗口
+        
+        // 确保窗口在所有界面之上
+        [g_floatWindow makeKeyAndVisible];
+        
+        NSLog(@"TrackHook: 🪟 已创建独立悬浮窗口");
+    }
+    
+    // 2. 如果按钮已存在，先移除
+    UIButton *oldBtn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
+    if (oldBtn) {
+        [oldBtn removeFromSuperview];
+        NSLog(@"TrackHook: 🔄 移除旧按钮");
+    }
+    
+    // 3. 创建新按钮
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     btn.tag = TRACK_BTN_TAG;
-    btn.frame = CGRectMake(win.bounds.size.width - 70, win.bounds.size.height / 2, 56, 56);
+    btn.frame = CGRectMake(g_floatWindow.bounds.size.width - 70, g_floatWindow.bounds.size.height / 2, 56, 56);
     btn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
     [btn setTitle:@"🛰️" forState:UIControlStateNormal];
     [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -355,10 +377,16 @@ static double g_targetDistance = -1.0;
     btn.layer.zPosition = 9999;
     
     [btn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
+    
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
     [btn addGestureRecognizer:pan];
-    [win addSubview:btn];
-    NSLog(@"TrackHook: ✅ 悬浮按钮已添加到窗口");
+    
+    [g_floatWindow addSubview:btn];
+    
+    // 确保按钮在最前面
+    [g_floatWindow bringSubviewToFront:btn];
+    
+    NSLog(@"TrackHook: ✅ 悬浮按钮已添加到独立窗口 (窗口层级: %.0f)", g_floatWindow.windowLevel);
 }
 
 %new
@@ -368,6 +396,7 @@ static double g_targetDistance = -1.0;
     v.center = CGPointMake(v.center.x + translation.x, v.center.y + translation.y);
     [pan setTranslation:CGPointZero inView:v.superview];
     
+    // 限制在窗口内
     CGFloat margin = 28;
     CGRect safeArea = v.superview.bounds;
     v.center = CGPointMake(MAX(margin, MIN(safeArea.size.width - margin, v.center.x)),
@@ -377,9 +406,16 @@ static double g_targetDistance = -1.0;
 %new
 - (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *win = [self th_getSafeKeyWindow];
-        if (!win) return;
-        for (UIView *subview in win.subviews) {
+        // 在独立窗口上显示toast
+        if (!g_floatWindow) {
+            g_floatWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            g_floatWindow.windowLevel = UIWindowLevelStatusBar + 1;
+            g_floatWindow.backgroundColor = [UIColor clearColor];
+            g_floatWindow.userInteractionEnabled = YES;
+            g_floatWindow.hidden = NO;
+        }
+        
+        for (UIView *subview in g_floatWindow.subviews) {
             if ([subview isKindOfClass:[UILabel class]] && subview.tag == 9999) {
                 [subview removeFromSuperview];
             }
@@ -396,11 +432,11 @@ static double g_targetDistance = -1.0;
         lab.clipsToBounds = YES;
         lab.numberOfLines = 0;
         
-        CGSize textSize = [lab sizeThatFits:CGSizeMake(win.bounds.size.width * 0.7, 100)];
+        CGSize textSize = [lab sizeThatFits:CGSizeMake(g_floatWindow.bounds.size.width * 0.7, 100)];
         lab.bounds = CGRectMake(0, 0, textSize.width + 30, textSize.height + 20);
-        lab.center = CGPointMake(win.bounds.size.width / 2, win.bounds.size.height * 0.85);
+        lab.center = CGPointMake(g_floatWindow.bounds.size.width / 2, g_floatWindow.bounds.size.height * 0.85);
         
-        [win addSubview:lab];
+        [g_floatWindow addSubview:lab];
         lab.alpha = 0;
         [UIView animateWithDuration:0.3 animations:^{ lab.alpha = 1.0; }];
         [UIView animateWithDuration:0.3 delay:dur options:0 animations:^{ lab.alpha = 0; } completion:^(BOOL finished) { 
@@ -428,10 +464,13 @@ static double g_targetDistance = -1.0;
             [self th_addBtn];
         });
     } else {
-        UIWindow *win = [self th_getSafeKeyWindow];
-        UIView *btn = [win viewWithTag:TRACK_BTN_TAG];
-        if (btn) {
-            [btn removeFromSuperview];
+        // 在非目标页面，隐藏按钮但保留窗口
+        if (g_floatWindow) {
+            UIView *btn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
+            if (btn) {
+                [btn removeFromSuperview];
+                NSLog(@"TrackHook: 🗑️ 在非目标页面移除按钮");
+            }
         }
     }
 }
