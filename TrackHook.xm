@@ -1,202 +1,34 @@
-#import <UIKit/UIKit.h>
-#import <Foundation/Foundation.h>
-#import <math.h>
-#import <objc/runtime.h>
+name: Build Tweak
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
-#define TRACK_BTN_TAG 100001
-#define EARTH_RADIUS_KM 111.32
-#define BLUED_BUNDLE_ID @"com.bluecity.blued"
-
-static NSString *g_bluedBasicToken = nil;
-static NSString *g_currentTargetUid = nil;
-static double g_initialDistance = -1.0;
-
-@interface UIViewController (TrackHook)
-- (UIWindow *)th_getSafeKeyWindow;
-- (void)th_autoFetchUserInfo;
-- (void)th_onBtnClick;
-- (void)th_addBtn;
-- (void)th_handlePan:(UIPanGestureRecognizer *)pan;
-- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
-@end
-
-%hook UIViewController
-
-%new
-- (UIWindow *)th_getSafeKeyWindow {
-    UIWindow *foundWindow = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        foundWindow = window;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    return foundWindow ?: [UIApplication sharedApplication].keyWindow;
-}
-
-%new
-- (void)th_onBtnClick {
-    // 基础指针合法性校验
-    if (!self || ![self isKindOfClass:[UIViewController class]]) return;
+jobs:
+  build:
+    runs-on: macos-latest
     
-    [self th_autoFetchUserInfo];
-    
-    if (!g_currentTargetUid || !g_bluedBasicToken) {
-        [self th_showToast:@"未抓取到数据，请在页面滑动刷新" duration:2.0];
-        return;
-    }
-
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:BLUED_BUNDLE_ID];
-    double myLat = [ud doubleForKey:@"current_latitude"];
-    double myLng = [ud doubleForKey:@"current_longitude"];
-    
-    if (myLat == 0) {
-        [self th_showToast:@"本地GPS为空" duration:2.0];
-        return;
-    }
-
-    [self th_showToast:@"🛰️ 递归扫描中..." duration:1.0];
-
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        double cLat = myLat, cLng = myLng, cDist = g_initialDistance;
-        for (int i=0; i<8; i++) {
-            NSString *urlStr = [NSString stringWithFormat:@"https://argo.blued.cn/users/%@/basic", g_currentTargetUid];
-            NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
-            [req setValue:[NSString stringWithFormat:@"Basic %@", g_bluedBasicToken] forHTTPHeaderField:@"Authorization"];
-            req.timeoutInterval = 2.0;
-
-            __block double nDist = -1.0;
-            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-            [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
-                if (data) {
-                    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                    if (json && json[@"data"]) nDist = [json[@"data"][@"distance"] doubleValue];
-                }
-                dispatch_semaphore_signal(sem);
-            }] resume];
-            dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)));
-
-            if (nDist < 0) break;
-            double oLng = cLng + (cDist / (EARTH_RADIUS_KM * cos(cLat * M_PI/180)));
-            cLng = (cLng + oLng) / 2.0;
-            cDist = (cDist + nDist) / 2.0;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *resStr = [NSString stringWithFormat:@"结果: %.6f, %.6f", cLat, cLng];
-            UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:@"计算完成" message:resStr preferredStyle:UIAlertControllerStyleAlert];
-            [resAlert addAction:[UIAlertAction actionWithTitle:@"复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-                [UIPasteboard generalPasteboard].string = [NSString stringWithFormat:@"%.6f,%.6f", cLat, cLng];
-            }]];
-            [resAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-            [self presentViewController:resAlert animated:YES completion:nil];
-        });
-    });
-}
-
-%new
-- (void)th_autoFetchUserInfo {
-    // 【核心防退修复】改为尝试捕获特定成员变量，而不是暴力遍历所有 Property
-    @try {
-        id model = nil;
-        // 尝试通过常见的 Blued 用户模型变量名获取（根据版本不同可能变化）
-        if ([self respondsToSelector:NSSelectorFromString(@"userModel")]) {
-            model = [self valueForKey:@"userModel"];
-        } else if ([self respondsToSelector:NSSelectorFromString(@"user")]) {
-            model = [self valueForKey:@"user"];
-        }
-        
-        if (model && [model respondsToSelector:NSSelectorFromString(@"uid")]) {
-            g_currentTargetUid = [NSString stringWithFormat:@"%@", [model valueForKey:@"uid"]];
-            g_initialDistance = [[model valueForKey:@"distance"] doubleValue];
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[TrackHook] 属性访问异常: %@", e);
-    }
-}
-
-%new
-- (void)th_addBtn {
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [self th_addBtn]; });
-        return;
-    }
-
-    UIWindow *win = [self th_getSafeKeyWindow];
-    if (!win || [win viewWithTag:TRACK_BTN_TAG]) return;
-
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    btn.tag = TRACK_BTN_TAG;
-    btn.frame = CGRectMake(win.bounds.size.width - 70, 200, 56, 56);
-    btn.backgroundColor = [[UIColor colorWithRed:0 green:0.4 blue:0.9 alpha:1] colorWithAlphaComponent:0.8];
-    [btn setTitle:@"🛰️" forState:UIControlStateNormal];
-    btn.layer.cornerRadius = 28;
-    btn.layer.zPosition = 9999;
-    
-    [btn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
-    [btn addGestureRecognizer:pan];
-    [win addSubview:btn];
-}
-
-%new
-- (void)th_handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *v = pan.view;
-    CGPoint p = [pan translationInView:v.superview];
-    v.center = CGPointMake(v.center.x + p.x, v.center.y + p.y);
-    [pan setTranslation:CGPointZero inView:v.superview];
-}
-
-%new
-- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *win = [self th_getSafeKeyWindow];
-        if (!win) return;
-        UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(0,0,200,40)];
-        lab.center = CGPointMake(win.bounds.size.width/2, win.bounds.size.height * 0.85);
-        lab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.75];
-        lab.textColor = [UIColor whiteColor];
-        lab.textAlignment = NSTextAlignmentCenter;
-        lab.text = msg;
-        lab.font = [UIFont boldSystemFontOfSize:14];
-        lab.layer.cornerRadius = 10;
-        lab.clipsToBounds = YES;
-        [win addSubview:lab];
-        [UIView animateWithDuration:0.5 delay:dur options:0 animations:^{ lab.alpha = 0; } completion:^(BOOL f){ [lab removeFromSuperview]; }];
-    });
-}
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    NSString *cls = NSStringFromClass([self class]);
-    // 只在包含相关关键词的页面注入，减少系统负担
-    if ([cls containsString:@"Detail"] || [cls containsString:@"User"] || [cls containsString:@"Profile"]) {
-        // 【关键修复】延迟 1.5 秒注入，避开页面加载时的 CPU 峰值和内存抖动
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self th_addBtn];
-        });
-    }
-}
-%end
-
-%hook NSURLSession
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *res, NSError *err))completionHandler {
-    if (request && request.allHTTPHeaderFields[@"Authorization"]) {
-        NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
-        if ([auth hasPrefix:@"Basic "]) {
-            // 异步复制 Token 避免阻塞网络线程
-            dispatch_async(dispatch_get_global_queue(0,0), ^{
-                g_bluedBasicToken = [[auth substringFromIndex:6] copy];
-            });
-        }
-    }
-    return %orig(request, completionHandler);
-}
-%end
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 安装 Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+      
+      - name: 安装依赖
+        run: |
+          brew install ldid
+          brew install make
+      
+      - name: 编译
+        run: |
+          make clean
+          make package
+      
+      - name: 上传成品
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrackHook
+          path: packages/*.deb
