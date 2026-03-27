@@ -154,7 +154,6 @@ static double g_initialDistance = -1.0;
 
 %new
 - (void)th_autoFetchUserInfo {
-    // 【紧急修复】用完整的@try...@catch包裹，防止任何未捕获的异常导致崩溃
     NSLog(@"TrackHook: th_autoFetchUserInfo 开始执行");
     
     // 先清空旧数据，避免残留
@@ -168,7 +167,6 @@ static double g_initialDistance = -1.0;
         id potentialModel = nil;
         UIResponder *responder = self.view;
         while (responder && !potentialModel) {
-            // 使用安全的 respondsToSelector: 检查
             if ([responder respondsToSelector:@selector(userModel)]) {
                 potentialModel = [responder valueForKey:@"userModel"];
                 NSLog(@"TrackHook: 通过响应者链找到 userModel: %@", potentialModel);
@@ -181,13 +179,21 @@ static double g_initialDistance = -1.0;
                 potentialModel = [responder valueForKey:@"targetUser"];
                 NSLog(@"TrackHook: 通过响应者链找到 targetUser: %@", potentialModel);
                 break;
+            } else if ([responder respondsToSelector:@selector(personData)]) {
+                potentialModel = [responder valueForKey:@"personData"];
+                NSLog(@"TrackHook: 通过响应者链找到 personData: %@", potentialModel);
+                break;
+            } else if ([responder respondsToSelector:@selector(dataItem)]) {
+                potentialModel = [responder valueForKey:@"dataItem"];
+                NSLog(@"TrackHook: 通过响应者链找到 dataItem: %@", potentialModel);
+                break;
             }
             responder = [responder nextResponder];
         }
         
         // 方法2: 如果响应者链没找到，尝试当前控制器本身的属性
         if (!potentialModel) {
-            NSArray *propertyNames = @[@"userModel", @"user", @"targetUser", @"dataItem", @"currentUser"];
+            NSArray *propertyNames = @[@"userModel", @"user", @"targetUser", @"dataItem", @"currentUser", @"personData", @"homePageData", @"model"];
             for (NSString *name in propertyNames) {
                 SEL sel = NSSelectorFromString(name);
                 if ([self respondsToSelector:sel]) {
@@ -210,6 +216,21 @@ static double g_initialDistance = -1.0;
                 if (uidValue && uidValue != [NSNull null]) {
                     uid = [NSString stringWithFormat:@"%@", uidValue];
                     NSLog(@"TrackHook: 获取到 uid: %@", uid);
+                }
+            }
+            
+            // 尝试其他可能的ID属性名
+            if (!uid) {
+                NSArray *idProperties = @[@"userId", @"userID", @"user_id", @"id", @"ID"];
+                for (NSString *prop in idProperties) {
+                    if ([potentialModel respondsToSelector:NSSelectorFromString(prop)]) {
+                        id idValue = [potentialModel valueForKey:prop];
+                        if (idValue && idValue != [NSNull null]) {
+                            uid = [NSString stringWithFormat:@"%@", idValue];
+                            NSLog(@"TrackHook: 通过属性 %@ 获取到 ID: %@", prop, uid);
+                            break;
+                        }
+                    }
                 }
             }
             
@@ -237,7 +258,7 @@ static double g_initialDistance = -1.0;
         }
         
     } @catch (NSException *exception) {
-        // 【核心修复】捕获所有异常，记录日志，但绝不崩溃
+        // 捕获所有异常，记录日志，但绝不崩溃
         NSLog(@"TrackHook: th_autoFetchUserInfo 捕获到异常，已安全处理。异常信息: %@", exception);
     }
     
@@ -334,7 +355,10 @@ static double g_initialDistance = -1.0;
     %orig;
     NSLog(@"TrackHook: viewDidAppear 被调用，当前控制器: %@", NSStringFromClass([self class]));
     NSString *clsName = NSStringFromClass([self class]);
-    NSArray *targetKeywords = @[@"Detail", @"User", @"Profile", @"Homepage", @"Info"];
+    
+    // 【关键修改】添加 HomePage 和 PersonData 到目标关键词
+    // 因为您的日志显示目标页面是 BDHomePagePersonDataViewController
+    NSArray *targetKeywords = @[@"Detail", @"User", @"Profile", @"Homepage", @"Info", @"HomePage", @"PersonData"];
     BOOL shouldInject = NO;
     for (NSString *keyword in targetKeywords) {
         if ([clsName containsString:keyword]) {
