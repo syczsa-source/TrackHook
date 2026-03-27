@@ -20,6 +20,8 @@ static double g_initialDistance = -1.0;
 - (void)th_addBtn;
 - (void)th_handlePan:(UIPanGestureRecognizer *)pan;
 - (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
+- (id)findModelInObject:(id)obj depth:(int)depth maxDepth:(int)maxDepth;
+- (void)debugAllPropertiesOfObject:(id)obj;
 @end
 
 %hook UIViewController
@@ -154,93 +156,89 @@ static double g_initialDistance = -1.0;
 
 %new
 - (void)th_autoFetchUserInfo {
-    NSLog(@"TrackHook: th_autoFetchUserInfo 开始执行");
+    NSLog(@"TrackHook: th_autoFetchUserInfo 开始执行 - 当前控制器: %@", NSStringFromClass([self class]));
     
-    // 先清空旧数据，避免残留
     [g_dataLock lock];
     g_currentTargetUid = nil;
     g_initialDistance = -1.0;
     [g_dataLock unlock];
     
     @try {
-        // 方法1: 通过响应者链查找可能的模型对象
+        // 策略1: 从控制器自身属性查找
+        NSArray *controllerProps = @[@"userModel", @"user", @"targetUser", @"personData", @"homePageData", @"dataItem", @"model", @"data", @"currentUser", @"targetUserModel"];
         id potentialModel = nil;
-        UIResponder *responder = self.view;
-        while (responder && !potentialModel) {
-            if ([responder respondsToSelector:@selector(userModel)]) {
-                potentialModel = [responder valueForKey:@"userModel"];
-                NSLog(@"TrackHook: 通过响应者链找到 userModel: %@", potentialModel);
-                break;
-            } else if ([responder respondsToSelector:@selector(user)]) {
-                potentialModel = [responder valueForKey:@"user"];
-                NSLog(@"TrackHook: 通过响应者链找到 user: %@", potentialModel);
-                break;
-            } else if ([responder respondsToSelector:@selector(targetUser)]) {
-                potentialModel = [responder valueForKey:@"targetUser"];
-                NSLog(@"TrackHook: 通过响应者链找到 targetUser: %@", potentialModel);
-                break;
-            } else if ([responder respondsToSelector:@selector(personData)]) {
-                potentialModel = [responder valueForKey:@"personData"];
-                NSLog(@"TrackHook: 通过响应者链找到 personData: %@", potentialModel);
-                break;
-            } else if ([responder respondsToSelector:@selector(dataItem)]) {
-                potentialModel = [responder valueForKey:@"dataItem"];
-                NSLog(@"TrackHook: 通过响应者链找到 dataItem: %@", potentialModel);
-                break;
-            }
-            responder = [responder nextResponder];
-        }
         
-        // 方法2: 如果响应者链没找到，尝试当前控制器本身的属性
-        if (!potentialModel) {
-            NSArray *propertyNames = @[@"userModel", @"user", @"targetUser", @"dataItem", @"currentUser", @"personData", @"homePageData", @"model"];
-            for (NSString *name in propertyNames) {
-                SEL sel = NSSelectorFromString(name);
-                if ([self respondsToSelector:sel]) {
-                    potentialModel = [self valueForKey:name];
-                    if (potentialModel) {
-                        NSLog(@"TrackHook: 通过控制器属性找到 %@: %@", name, potentialModel);
+        for (NSString *prop in controllerProps) {
+            @try {
+                if ([self respondsToSelector:NSSelectorFromString(prop)]) {
+                    id value = [self valueForKey:prop];
+                    if (value && value != [NSNull null]) {
+                        potentialModel = value;
+                        NSLog(@"TrackHook: 从控制器属性 '%@' 找到对象", prop);
                         break;
                     }
                 }
+            } @catch (NSException *e) { /* 忽略 */ }
+        }
+        
+        // 策略2: 从响应者链中查找
+        if (!potentialModel) {
+            UIResponder *responder = self.view;
+            while (responder && !potentialModel) {
+                for (NSString *prop in controllerProps) {
+                    @try {
+                        if ([responder respondsToSelector:NSSelectorFromString(prop)]) {
+                            id value = [responder valueForKey:prop];
+                            if (value && value != [NSNull null]) {
+                                potentialModel = value;
+                                NSLog(@"TrackHook: 从响应者(%@)属性 '%@' 找到对象", [responder class], prop);
+                                break;
+                            }
+                        }
+                    } @catch (NSException *e) { /* 忽略 */ }
+                }
+                responder = [responder nextResponder];
             }
         }
         
+        // 策略3: 从视图层级中递归查找
+        if (!potentialModel) {
+            potentialModel = [self findModelInObject:self.view depth:0 maxDepth:3];
+        }
+        
         if (potentialModel) {
+            NSLog(@"TrackHook: 定位到疑似数据对象，类型: %@", NSStringFromClass([potentialModel class]));
+            
+            // 尝试提取用户ID
             NSString *uid = nil;
-            double distance = -1.0;
-            
-            // 安全获取 uid
-            if ([potentialModel respondsToSelector:@selector(uid)]) {
-                id uidValue = [potentialModel valueForKey:@"uid"];
-                if (uidValue && uidValue != [NSNull null]) {
-                    uid = [NSString stringWithFormat:@"%@", uidValue];
-                    NSLog(@"TrackHook: 获取到 uid: %@", uid);
-                }
-            }
-            
-            // 尝试其他可能的ID属性名
-            if (!uid) {
-                NSArray *idProperties = @[@"userId", @"userID", @"user_id", @"id", @"ID"];
-                for (NSString *prop in idProperties) {
-                    if ([potentialModel respondsToSelector:NSSelectorFromString(prop)]) {
-                        id idValue = [potentialModel valueForKey:prop];
-                        if (idValue && idValue != [NSNull null]) {
-                            uid = [NSString stringWithFormat:@"%@", idValue];
-                            NSLog(@"TrackHook: 通过属性 %@ 获取到 ID: %@", prop, uid);
+            NSArray *idKeys = @[@"uid", @"userId", @"userID", @"user_id", @"id", @"ID", @"userUid", @"userUidStr"];
+            for (NSString *key in idKeys) {
+                @try {
+                    if ([potentialModel respondsToSelector:NSSelectorFromString(key)]) {
+                        id value = [potentialModel valueForKey:key];
+                        if (value && value != [NSNull null]) {
+                            uid = [NSString stringWithFormat:@"%@", value];
+                            NSLog(@"TrackHook: 从键 '%@' 提取到 UID: %@", key, uid);
                             break;
                         }
                     }
-                }
+                } @catch (NSException *e) { /* 忽略 */ }
             }
             
-            // 安全获取 distance
-            if ([potentialModel respondsToSelector:@selector(distance)]) {
-                id distValue = [potentialModel valueForKey:@"distance"];
-                if (distValue && [distValue isKindOfClass:[NSNumber class]]) {
-                    distance = [distValue doubleValue];
-                    NSLog(@"TrackHook: 获取到 distance: %.2f", distance);
-                }
+            // 尝试提取距离
+            double distance = -1.0;
+            NSArray *distKeys = @[@"distance", @"dis", @"dist", @"range", @"km", @"rangeMeter", @"meter"];
+            for (NSString *key in distKeys) {
+                @try {
+                    if ([potentialModel respondsToSelector:NSSelectorFromString(key)]) {
+                        id value = [potentialModel valueForKey:key];
+                        if (value && [value isKindOfClass:[NSNumber class]]) {
+                            distance = [value doubleValue];
+                            NSLog(@"TrackHook: 从键 '%@' 提取到距离: %.2f", key, distance);
+                            break;
+                        }
+                    }
+                } @catch (NSException *e) { /* 忽略 */ }
             }
             
             if (uid && distance > 0) {
@@ -248,22 +246,90 @@ static double g_initialDistance = -1.0;
                 g_currentTargetUid = [uid copy];
                 g_initialDistance = distance;
                 [g_dataLock unlock];
-                NSLog(@"TrackHook: 成功保存目标数据 UID: %@, Distance: %.2f", uid, distance);
+                NSLog(@"TrackHook: 数据获取成功! UID: %@, Distance: %.2f", uid, distance);
                 return;
             } else {
-                NSLog(@"TrackHook: 找到模型对象，但未获取到有效 uid 或 distance");
+                NSLog(@"TrackHook: 已找到对象但未解析出有效数据，开始深度调试...");
+                [self debugAllPropertiesOfObject:potentialModel];
             }
         } else {
-            NSLog(@"TrackHook: 未在当前页面找到用户模型对象");
+            NSLog(@"TrackHook: 未在页面中发现疑似用户数据的对象。");
         }
         
     } @catch (NSException *exception) {
-        // 捕获所有异常，记录日志，但绝不崩溃
-        NSLog(@"TrackHook: th_autoFetchUserInfo 捕获到异常，已安全处理。异常信息: %@", exception);
+        NSLog(@"TrackHook: th_autoFetchUserInfo 执行过程捕获到异常: %@", exception);
     }
     
-    // 无论成功与否，执行到这里都确保数据是空的
-    NSLog(@"TrackHook: th_autoFetchUserInfo 执行完毕，未设置目标数据");
+    NSLog(@"TrackHook: th_autoFetchUserInfo 执行完毕，未能设置目标数据。");
+}
+
+%new
+- (id)findModelInObject:(id)obj depth:(int)depth maxDepth:(int)maxDepth {
+    if (!obj || depth > maxDepth) return nil;
+    
+    // 如果对象本身看起来像模型（包含关键字段），则返回
+    NSArray *indicators = @[@"uid", @"userId", @"distance"];
+    for (NSString *indicator in indicators) {
+        @try {
+            if ([obj respondsToSelector:NSSelectorFromString(indicator)]) {
+                id value = [obj valueForKey:indicator];
+                if (value) {
+                    NSLog(@"TrackHook: 在深度 %d 的对象 %@ 中发现关键字段 '%@'", depth, [obj class], indicator);
+                    return obj;
+                }
+            }
+        } @catch (NSException *e) { /* 忽略 */ }
+    }
+    
+    // 递归查找子对象
+    if (depth < maxDepth) {
+        if ([obj isKindOfClass:[NSArray class]] || [obj isKindOfClass:[NSSet class]]) {
+            for (id subObj in obj) {
+                id found = [self findModelInObject:subObj depth:depth+1 maxDepth:maxDepth];
+                if (found) return found;
+            }
+        } else if ([obj isKindOfClass:[NSDictionary class]]) {
+            for (id key in obj) {
+                id found = [self findModelInObject:obj[key] depth:depth+1 maxDepth:maxDepth];
+                if (found) return found;
+            }
+        } else if ([obj isKindOfClass:[UIView class]]) {
+            for (UIView *subview in [obj subviews]) {
+                id found = [self findModelInObject:subview depth:depth+1 maxDepth:maxDepth];
+                if (found) return found;
+            }
+        }
+    }
+    
+    return nil;
+}
+
+%new
+- (void)debugAllPropertiesOfObject:(id)obj {
+    if (!obj) return;
+    
+    Class currentClass = [obj class];
+    while (currentClass && currentClass != [NSObject class]) {
+        unsigned int count = 0;
+        objc_property_t *properties = class_copyPropertyList(currentClass, &count);
+        
+        if (count > 0) {
+            NSLog(@"TrackHook: === 对象类 %@ 的属性列表 ===", NSStringFromClass(currentClass));
+            for (unsigned int i = 0; i < count; i++) {
+                const char *propName = property_getName(properties[i]);
+                NSString *propertyName = [NSString stringWithUTF8String:propName];
+                
+                @try {
+                    id value = [obj valueForKey:propertyName];
+                    NSLog(@"TrackHook:   [%@] = %@", propertyName, value);
+                } @catch (NSException *e) {
+                    NSLog(@"TrackHook:   [%@] = <访问异常: %@>", propertyName, e);
+                }
+            }
+        }
+        free(properties);
+        currentClass = class_getSuperclass(currentClass);
+    }
 }
 
 %new
@@ -334,9 +400,9 @@ static double g_initialDistance = -1.0;
         lab.tag = 9999;
         lab.text = msg;
         lab.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-        lab.textColor = [UIColor whiteColor];
         lab.textAlignment = NSTextAlignmentCenter;
         lab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
+        lab.textColor = [UIColor whiteColor];
         lab.layer.cornerRadius = 10;
         lab.clipsToBounds = YES;
         lab.numberOfLines = 0;
@@ -353,12 +419,11 @@ static double g_initialDistance = -1.0;
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    NSLog(@"TrackHook: viewDidAppear 被调用，当前控制器: %@", NSStringFromClass([self class]));
     NSString *clsName = NSStringFromClass([self class]);
+    NSLog(@"TrackHook: viewDidAppear 被调用，当前控制器: %@", clsName);
     
-    // 【关键修改】添加 HomePage 和 PersonData 到目标关键词
-    // 因为您的日志显示目标页面是 BDHomePagePersonDataViewController
-    NSArray *targetKeywords = @[@"Detail", @"User", @"Profile", @"Homepage", @"Info", @"HomePage", @"PersonData"];
+    // 更新目标关键词，覆盖已发现的两种页面类型
+    NSArray *targetKeywords = @[@"Detail", @"User", @"Profile", @"Homepage", @"Info", @"HomePage", @"PersonData", @"HomeView"];
     BOOL shouldInject = NO;
     for (NSString *keyword in targetKeywords) {
         if ([clsName containsString:keyword]) {
