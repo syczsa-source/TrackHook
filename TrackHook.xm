@@ -46,9 +46,10 @@ static UIWindow *g_floatWindow = nil;
 - (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
 @end
 
+// 修复：更新NSURLSession类别方法声明，添加url参数
 @interface NSURLSession (TrackHookMethods)
-- (void)extractDistanceFromJSON:(NSDictionary *)json;
-- (void)deepSearchDistanceInObject:(id)obj;
+- (void)extractDistanceFromJSON:(NSDictionary *)json url:(NSString *)urlString;
+- (void)deepSearchDistanceInObject:(id)obj url:(NSString *)urlString;
 @end
 // ==================== 类别声明结束 ====================
 
