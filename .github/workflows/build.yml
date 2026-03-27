@@ -69,10 +69,13 @@ jobs:
           make clean 2>/dev/null || true
           rm -rf .theos packages 2>/dev/null || true
 
-      - name: Build & Package
+- name: Build & Package
         run: |
           export PATH="/usr/local/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
           export THEOS=$THEOS
+          
+          # 核心修复：在打包前，强制清除 control 文件里的 Windows 换行符 (\r)
+          sed -i '' 's/\r$//' control
           
           make package FINALPACKAGE=1 CODESIGN_IPA=0 V=1
           
