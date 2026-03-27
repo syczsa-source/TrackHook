@@ -10,7 +10,7 @@ static NSString *g_currentTargetUid = nil;
 static double g_currentLat = 0.0;
 static double g_currentLng = 0.0;
 static double g_targetDistance = -1.0;
-static UIWindow *g_floatWindow = nil;  // 新增：独立的浮动窗口
+static UIWindow *g_floatWindow = nil;
 
 // ==================== 类别方法声明 ====================
 @interface UIViewController (TrackHookMethods)
@@ -331,62 +331,69 @@ static UIWindow *g_floatWindow = nil;  // 新增：独立的浮动窗口
 - (void)th_addBtn {
     NSLog(@"TrackHook: 🎨 准备添加悬浮按钮");
     
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [self th_addBtn]; });
-        return;
-    }
-    
-    // 1. 创建独立的悬浮窗口（如果不存在）
-    if (!g_floatWindow) {
-        CGRect screenBounds = [UIScreen mainScreen].bounds;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 1. 获取当前活跃的窗口场景（WindowScene），这对于多窗口应用至关重要
+        UIWindowScene *targetScene = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
+                    targetScene = (UIWindowScene *)scene;
+                    break;
+                }
+            }
+        }
         
-        // 创建一个透明窗口，不干扰主应用
-        g_floatWindow = [[UIWindow alloc] initWithFrame:screenBounds];
-        g_floatWindow.windowLevel = UIWindowLevelStatusBar + 1;  // 在状态栏之上
-        g_floatWindow.backgroundColor = [UIColor clearColor];  // 透明背景
-        g_floatWindow.userInteractionEnabled = YES;  // 允许交互
-        g_floatWindow.hidden = NO;  // 显示窗口
+        if (!targetScene) {
+            NSLog(@"TrackHook: ❌ 无法获取当前活跃的 WindowScene");
+            return;
+        }
         
-        // 确保窗口在所有界面之上
-        [g_floatWindow makeKeyAndVisible];
+        // 2. 创建或更新独立的悬浮窗口
+        if (!g_floatWindow || g_floatWindow.windowScene != targetScene) {
+            // 如果窗口不存在，或不属于当前活跃的场景，则重新创建
+            CGRect screenBounds = targetScene.coordinateSpace.bounds;
+            g_floatWindow = [[UIWindow alloc] initWithFrame:screenBounds];
+            g_floatWindow.windowScene = targetScene; // 【关键】关联到当前场景
+            g_floatWindow.windowLevel = UIWindowLevelAlert + 1000; // 设为非常高的层级
+            g_floatWindow.backgroundColor = [UIColor clearColor];
+            g_floatWindow.rootViewController = [UIViewController new]; // 避免警告
+            g_floatWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
+            g_floatWindow.userInteractionEnabled = YES;
+            g_floatWindow.hidden = NO;
+            [g_floatWindow makeKeyAndVisible]; // 【关键】尝试成为Key Window
+            
+            NSLog(@"TrackHook: 🪟 已创建/更新独立悬浮窗口 (Scene: %@, Level: %.0f)", targetScene, g_floatWindow.windowLevel);
+        }
         
-        NSLog(@"TrackHook: 🪟 已创建独立悬浮窗口");
-    }
-    
-    // 2. 如果按钮已存在，先移除
-    UIButton *oldBtn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
-    if (oldBtn) {
-        [oldBtn removeFromSuperview];
-        NSLog(@"TrackHook: 🔄 移除旧按钮");
-    }
-    
-    // 3. 创建新按钮
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    btn.tag = TRACK_BTN_TAG;
-    btn.frame = CGRectMake(g_floatWindow.bounds.size.width - 70, g_floatWindow.bounds.size.height / 2, 56, 56);
-    btn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
-    [btn setTitle:@"🛰️" forState:UIControlStateNormal];
-    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:24];
-    btn.layer.cornerRadius = 28;
-    btn.layer.borderWidth = 1.0;
-    btn.layer.borderColor = [UIColor whiteColor].CGColor;
-    btn.layer.shadowColor = [UIColor blackColor].CGColor;
-    btn.layer.shadowOffset = CGSizeMake(0, 2);
-    btn.layer.shadowOpacity = 0.3;
-    btn.layer.zPosition = 9999;
-    
-    [btn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
-    
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
-    [btn addGestureRecognizer:pan];
-    
-    [g_floatWindow addSubview:btn];
-    
-    // 确保按钮在最前面
-    [g_floatWindow bringSubviewToFront:btn];
-    
-    NSLog(@"TrackHook: ✅ 悬浮按钮已添加到独立窗口 (窗口层级: %.0f)", g_floatWindow.windowLevel);
+        // 3. 移除旧按钮（如果存在）
+        UIButton *oldBtn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
+        if (oldBtn) {
+            [oldBtn removeFromSuperview];
+        }
+        
+        // 4. 创建并添加新按钮
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+        btn.tag = TRACK_BTN_TAG;
+        btn.frame = CGRectMake(g_floatWindow.bounds.size.width - 70, g_floatWindow.bounds.size.height / 2, 56, 56);
+        btn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
+        [btn setTitle:@"🛰️" forState:UIControlStateNormal];
+        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont systemFontOfSize:24];
+        btn.layer.cornerRadius = 28;
+        btn.layer.borderWidth = 1.0;
+        btn.layer.borderColor = [UIColor whiteColor].CGColor;
+        btn.layer.shadowColor = [UIColor blackColor].CGColor;
+        btn.layer.shadowOffset = CGSizeMake(0, 2);
+        btn.layer.shadowOpacity = 0.3;
+        
+        [btn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIEventTouchUpInside];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
+        [btn addGestureRecognizer:pan];
+        
+        [g_floatWindow addSubview:btn];
+        
+        NSLog(@"TrackHook: ✅ 悬浮按钮已添加到独立窗口");
+    });
 }
 
 %new
@@ -464,14 +471,9 @@ static UIWindow *g_floatWindow = nil;  // 新增：独立的浮动窗口
             [self th_addBtn];
         });
     } else {
-        // 在非目标页面，隐藏按钮但保留窗口
-        if (g_floatWindow) {
-            UIView *btn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
-            if (btn) {
-                [btn removeFromSuperview];
-                NSLog(@"TrackHook: 🗑️ 在非目标页面移除按钮");
-            }
-        }
+        // 【修改点】仅在明确需要时，才考虑隐藏按钮。此处先简单记录日志，观察规律。
+        NSLog(@"TrackHook: 📍 当前页面 (%@) 非目标页面，暂不处理按钮。", clsName);
+        // 注意：这里不再主动移除按钮，因为我们的悬浮窗口是全局独立的。
     }
 }
 %end
