@@ -1,26 +1,37 @@
-// 标准头文件导入
 #import <substrate.h>
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <math.h>
 #import <objc/runtime.h>
 
-// 核心配置宏（包名已统一）
 #define TRACK_BTN_TAG 100001
 #define EARTH_RADIUS_KM 111.32
 #define BLUED_BUNDLE_ID @"com.bluecity.blued"
 
-// 全局静态变量
 static NSString *g_bluedBasicToken = nil;
 static NSString *g_currentTargetUid = nil;
 static double g_initialDistance = -1.0;
 static UIButton *g_trackButton = nil;
 
-// ====================== 唯一UIViewController Hook块（方法严格按先定义后调用排列） ======================
 %hook UIViewController
 
-// ---------------------- 第1层：无依赖底层方法（必须放最前） ----------------------
-%new
+// ======================================
+// 【核心修复：所有方法的前向声明，放在最开头】
+// 提前告诉编译器这些方法存在，彻底解决找不到selector的报错
+// ======================================
+- (UIWindow *)th_getSafeKeyWindow;
+- (double)th_fetchDistanceWithUid:(NSString *)uid token:(NSString *)token fakeLat:(double)lat fakeLng:(double)lng;
+- (UIViewController *)th_getTopViewController;
+- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
+- (void)th_autoFetchUserInfo;
+- (void)th_dragBtn:(UIPanGestureRecognizer *)pan;
+- (void)th_showResult:(BOOL)success msg:(NSString *)msg lat:(double)lat lng:(double)lng;
+- (void)th_onBtnClick;
+- (void)th_addBtn;
+
+// ======================================
+// 下面是方法实现，顺序随便排都不会报错了
+// ======================================
 - (UIWindow *)th_getSafeKeyWindow {
     UIWindow *keyWindow = nil;
     if (@available(iOS 13.0, *)) {
@@ -35,7 +46,6 @@ static UIButton *g_trackButton = nil;
     return keyWindow;
 }
 
-%new
 - (double)th_fetchDistanceWithUid:(NSString *)uid token:(NSString *)token fakeLat:(double)lat fakeLng:(double)lng {
     NSString *urlStr = [NSString stringWithFormat:@"https://argo.blued.cn/users/%@/basic", uid];
     NSURL *url = [NSURL URLWithString:urlStr];
@@ -68,8 +78,6 @@ static UIButton *g_trackButton = nil;
     return resultDist;
 }
 
-// ---------------------- 第2层：依赖第1层方法 ----------------------
-%new
 - (UIViewController *)th_getTopViewController {
     UIViewController *topVC = [self th_getSafeKeyWindow].rootViewController;
     while (topVC.presentedViewController) {
@@ -78,8 +86,6 @@ static UIButton *g_trackButton = nil;
     return topVC;
 }
 
-// ---------------------- 第3层：依赖前2层方法 ----------------------
-%new
 - (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *win = [self th_getSafeKeyWindow];
@@ -107,7 +113,6 @@ static UIButton *g_trackButton = nil;
     });
 }
 
-%new
 - (void)th_autoFetchUserInfo {
     g_currentTargetUid = nil;
     g_initialDistance = -1;
@@ -133,7 +138,6 @@ static UIButton *g_trackButton = nil;
     free(props);
 }
 
-%new
 - (void)th_dragBtn:(UIPanGestureRecognizer *)pan {
     UIView *btn = pan.view;
     UIWindow *win = [self th_getSafeKeyWindow];
@@ -148,8 +152,6 @@ static UIButton *g_trackButton = nil;
     btn.frame = f;
 }
 
-// ---------------------- 第4层：依赖前面所有层方法 ----------------------
-%new
 - (void)th_showResult:(BOOL)success msg:(NSString *)msg lat:(double)lat lng:(double)lng {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *top = [self th_getTopViewController];
@@ -170,7 +172,6 @@ static UIButton *g_trackButton = nil;
     });
 }
 
-%new
 - (void)th_onBtnClick {
     [self th_autoFetchUserInfo];
     if (!g_currentTargetUid) { [self th_showToast:@"请先打开用户主页" duration:3.0]; return; }
@@ -198,8 +199,6 @@ static UIButton *g_trackButton = nil;
     });
 }
 
-// ---------------------- 第5层：按钮添加方法，依赖交互方法 ----------------------
-%new
 - (void)th_addBtn {
     UIWindow *win = [self th_getSafeKeyWindow];
     if (!win || win.bounds.size.width == 0) return;
@@ -224,7 +223,6 @@ static UIButton *g_trackButton = nil;
     [win bringSubviewToFront:g_trackButton];
 }
 
-// ---------------------- 第6层：入口Hook，放在最后，调用前面所有方法 ----------------------
 - (void)viewDidAppear:(BOOL)animated {
     %orig(animated);
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -234,7 +232,6 @@ static UIButton *g_trackButton = nil;
 
 %end
 
-// ====================== 全局Token抓取Hook ======================
 %hook NSURLSession
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
     NSDictionary *headers = request.allHTTPHeaderFields;
