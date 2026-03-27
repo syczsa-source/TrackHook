@@ -2,14 +2,12 @@
 #import <Foundation/Foundation.h>
 #import <math.h>
 #import <objc/runtime.h>
-#import <CoreLocation/CoreLocation.h> // 为更复杂的地理计算预留
+#import <CoreLocation/CoreLocation.h>
 
 #define TRACK_BTN_TAG 100001
-// 使用更精确的WGS-84椭球体长半轴半径（单位：公里），替换原有的粗略值
 #define EARTH_RADIUS_KM 6378.137
 #define BLUED_BUNDLE_ID @"com.bluecity.blued"
 
-// 使用线程安全的属性访问，避免数据竞争（参考文档中关于多线程及稳定性的强调）
 static NSLock *g_dataLock = nil;
 static NSString *g_bluedBasicToken = nil;
 static NSString *g_currentTargetUid = nil;
@@ -47,11 +45,11 @@ static double g_initialDistance = -1.0;
 
 %new
 - (void)th_onBtnClick {
+    NSLog(@"TrackHook: th_onBtnClick 被触发");
     if (!self || ![self isKindOfClass:[UIViewController class]]) return;
     
     [self th_autoFetchUserInfo];
     
-    // 加锁读取全局变量
     [g_dataLock lock];
     NSString *targetUid = [g_currentTargetUid copy];
     NSString *basicToken = [g_bluedBasicToken copy];
@@ -63,7 +61,6 @@ static double g_initialDistance = -1.0;
         return;
     }
 
-    // 修复：使用标准方式获取NSUserDefaults，避免潜在的内存泄漏和不必要的实例化
     NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:BLUED_BUNDLE_ID];
     if (!ud) {
         [self th_showToast:@"无法访问应用数据" duration:2.0];
@@ -72,7 +69,7 @@ static double g_initialDistance = -1.0;
     double myLat = [ud doubleForKey:@"current_latitude"];
     double myLng = [ud doubleForKey:@"current_longitude"];
     
-    if (fabs(myLat) < 0.001 && fabs(myLng) < 0.001) { // 更严格的判断
+    if (fabs(myLat) < 0.001 && fabs(myLng) < 0.001) {
         [self th_showToast:@"本地GPS数据无效" duration:2.0];
         return;
     }
@@ -80,14 +77,13 @@ static double g_initialDistance = -1.0;
     [self th_showToast:@"🛰️ 三角定位计算中..." duration:1.5];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 算法优化：使用二分查找逼近，而非简单平均，提高收敛速度和稳定性
-        double minLng = myLng - 1.0; // 初始搜索范围±1度
+        double minLng = myLng - 1.0;
         double maxLng = myLng + 1.0;
         double estimatedLng = myLng;
         double currentDist = initialDist;
         BOOL success = NO;
-        int maxIterations = 15; // 限制最大迭代次数
-        double tolerance = 0.01; // 收敛容忍度（公里）
+        int maxIterations = 15;
+        double tolerance = 0.01;
 
         for (int i = 0; i < maxIterations && !success; i++) {
             NSString *urlStr = [NSString stringWithFormat:@"https://argo.blued.cn/users/%@/basic", targetUid];
@@ -117,33 +113,27 @@ static double g_initialDistance = -1.0;
             }];
             [task resume];
             
-            // 等待请求完成，设置超时
             if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC))) != 0) {
-                break; // 超时
+                break;
             }
             
             if (requestFailed || newDist < 0) {
-                break; // 请求失败或数据无效
+                break;
             }
             
             double deltaDist = newDist - currentDist;
-            // 文档第六章强调的调试思想：此处逻辑可通过LLDB设置断点观察 deltaDist, estimatedLng 等值
             if (fabs(deltaDist) < tolerance) {
-                // 距离变化很小，认为已收敛
                 success = YES;
                 break;
             } else if (deltaDist > 0) {
-                // 新距离变大了，说明估计方向错误，向反方向调整搜索边界
                 maxLng = estimatedLng;
             } else {
-                // 新距离变小了，说明方向正确，继续向同方向调整搜索边界
                 minLng = estimatedLng;
             }
-            // 取新区间中点作为下一次的估计值
             estimatedLng = (minLng + maxLng) / 2.0;
             currentDist = newDist;
             
-            [NSThread sleepForTimeInterval:0.15]; // 增加请求间隔，降低频率
+            [NSThread sleepForTimeInterval:0.15];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -164,36 +154,48 @@ static double g_initialDistance = -1.0;
 
 %new
 - (void)th_autoFetchUserInfo {
-    // 【核心修复】借鉴文档第九、十章方法：从UI响应链追溯，而非盲目遍历属性
-    // 目标：找到当前视图控制器中持有“目标用户信息”的对象。
-    // 原方法暴力尝试属性名，不稳定。更好的方法是结合Cycript动态分析确定准确属性名。
-    // 此处提供一种更稳健的备选方案：尝试获取当前控制器的“数据模型”或“目标用户”属性。
-    // 实际逆向中，应使用Cycript的`choose`和`recursiveDescription`定位该对象。
+    // 【紧急修复】用完整的@try...@catch包裹，防止任何未捕获的异常导致崩溃
+    NSLog(@"TrackHook: th_autoFetchUserInfo 开始执行");
+    
+    // 先清空旧数据，避免残留
+    [g_dataLock lock];
+    g_currentTargetUid = nil;
+    g_initialDistance = -1.0;
+    [g_dataLock unlock];
+    
     @try {
+        // 方法1: 通过响应者链查找可能的模型对象
         id potentialModel = nil;
         UIResponder *responder = self.view;
-        // 方法1: 尝试从视图的nextResponder链中寻找（参考第十章iMessage案例）
         while (responder && !potentialModel) {
+            // 使用安全的 respondsToSelector: 检查
             if ([responder respondsToSelector:@selector(userModel)]) {
                 potentialModel = [responder valueForKey:@"userModel"];
+                NSLog(@"TrackHook: 通过响应者链找到 userModel: %@", potentialModel);
                 break;
             } else if ([responder respondsToSelector:@selector(user)]) {
                 potentialModel = [responder valueForKey:@"user"];
+                NSLog(@"TrackHook: 通过响应者链找到 user: %@", potentialModel);
                 break;
             } else if ([responder respondsToSelector:@selector(targetUser)]) {
                 potentialModel = [responder valueForKey:@"targetUser"];
+                NSLog(@"TrackHook: 通过响应者链找到 targetUser: %@", potentialModel);
                 break;
             }
             responder = [responder nextResponder];
         }
         
-        // 方法2: 如果方法1失败，回退到原逻辑尝试控制器的属性
+        // 方法2: 如果响应者链没找到，尝试当前控制器本身的属性
         if (!potentialModel) {
             NSArray *propertyNames = @[@"userModel", @"user", @"targetUser", @"dataItem", @"currentUser"];
             for (NSString *name in propertyNames) {
-                if ([self respondsToSelector:NSSelectorFromString(name)]) {
+                SEL sel = NSSelectorFromString(name);
+                if ([self respondsToSelector:sel]) {
                     potentialModel = [self valueForKey:name];
-                    if (potentialModel) break;
+                    if (potentialModel) {
+                        NSLog(@"TrackHook: 通过控制器属性找到 %@: %@", name, potentialModel);
+                        break;
+                    }
                 }
             }
         }
@@ -201,12 +203,23 @@ static double g_initialDistance = -1.0;
         if (potentialModel) {
             NSString *uid = nil;
             double distance = -1.0;
-            // 尝试从模型中获取uid和distance属性
+            
+            // 安全获取 uid
             if ([potentialModel respondsToSelector:@selector(uid)]) {
-                uid = [NSString stringWithFormat:@"%@", [potentialModel valueForKey:@"uid"]];
+                id uidValue = [potentialModel valueForKey:@"uid"];
+                if (uidValue && uidValue != [NSNull null]) {
+                    uid = [NSString stringWithFormat:@"%@", uidValue];
+                    NSLog(@"TrackHook: 获取到 uid: %@", uid);
+                }
             }
+            
+            // 安全获取 distance
             if ([potentialModel respondsToSelector:@selector(distance)]) {
-                distance = [[potentialModel valueForKey:@"distance"] doubleValue];
+                id distValue = [potentialModel valueForKey:@"distance"];
+                if (distValue && [distValue isKindOfClass:[NSNumber class]]) {
+                    distance = [distValue doubleValue];
+                    NSLog(@"TrackHook: 获取到 distance: %.2f", distance);
+                }
             }
             
             if (uid && distance > 0) {
@@ -214,27 +227,40 @@ static double g_initialDistance = -1.0;
                 g_currentTargetUid = [uid copy];
                 g_initialDistance = distance;
                 [g_dataLock unlock];
+                NSLog(@"TrackHook: 成功保存目标数据 UID: %@, Distance: %.2f", uid, distance);
                 return;
+            } else {
+                NSLog(@"TrackHook: 找到模型对象，但未获取到有效 uid 或 distance");
             }
+        } else {
+            NSLog(@"TrackHook: 未在当前页面找到用户模型对象");
         }
+        
     } @catch (NSException *exception) {
-        // 静默失败，避免崩溃
+        // 【核心修复】捕获所有异常，记录日志，但绝不崩溃
+        NSLog(@"TrackHook: th_autoFetchUserInfo 捕获到异常，已安全处理。异常信息: %@", exception);
     }
-    // 获取失败，清空旧数据
-    [g_dataLock lock];
-    g_currentTargetUid = nil;
-    g_initialDistance = -1.0;
-    [g_dataLock unlock];
+    
+    // 无论成功与否，执行到这里都确保数据是空的
+    NSLog(@"TrackHook: th_autoFetchUserInfo 执行完毕，未设置目标数据");
 }
 
 %new
 - (void)th_addBtn {
+    NSLog(@"TrackHook: th_addBtn 被调用");
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self th_addBtn]; });
         return;
     }
     UIWindow *win = [self th_getSafeKeyWindow];
-    if (!win || [win viewWithTag:TRACK_BTN_TAG]) return;
+    if (!win) {
+        NSLog(@"TrackHook: 未找到 KeyWindow");
+        return;
+    }
+    if ([win viewWithTag:TRACK_BTN_TAG]) {
+        NSLog(@"TrackHook: 按钮已存在");
+        return;
+    }
 
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
     btn.tag = TRACK_BTN_TAG;
@@ -255,6 +281,7 @@ static double g_initialDistance = -1.0;
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
     [btn addGestureRecognizer:pan];
     [win addSubview:btn];
+    NSLog(@"TrackHook: 悬浮按钮已添加到窗口");
 }
 
 %new
@@ -263,7 +290,6 @@ static double g_initialDistance = -1.0;
     CGPoint translation = [pan translationInView:v.superview];
     CGPoint newCenter = CGPointMake(v.center.x + translation.x, v.center.y + translation.y);
     
-    // 限制按钮不超出屏幕安全区域
     CGFloat margin = 28;
     newCenter.x = MAX(margin, MIN(v.superview.bounds.size.width - margin, newCenter.x));
     newCenter.y = MAX(margin, MIN(v.superview.bounds.size.height - margin, newCenter.y));
@@ -277,7 +303,6 @@ static double g_initialDistance = -1.0;
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *win = [self th_getSafeKeyWindow];
         if (!win) return;
-        // 移除旧的toast
         for (UIView *subview in win.subviews) {
             if ([subview isKindOfClass:[UILabel class]] && subview.tag == 9999) {
                 [subview removeFromSuperview];
@@ -307,26 +332,29 @@ static double g_initialDistance = -1.0;
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    NSLog(@"TrackHook: viewDidAppear 被调用，当前控制器: %@", NSStringFromClass([self class]));
     NSString *clsName = NSStringFromClass([self class]);
-    // 更精确地匹配目标页面，减少不必要的注入
     NSArray *targetKeywords = @[@"Detail", @"User", @"Profile", @"Homepage", @"Info"];
     BOOL shouldInject = NO;
     for (NSString *keyword in targetKeywords) {
         if ([clsName containsString:keyword]) {
             shouldInject = YES;
+            NSLog(@"TrackHook: 页面类名包含关键字 '%@'，将注入按钮", keyword);
             break;
         }
     }
     
     if (shouldInject) {
-        // 延迟注入，避免与页面动画冲突
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self th_addBtn];
         });
     } else {
-        // 如果不是目标页面，则移除可能存在的按钮（如果用户拖拽到了这里）
         UIWindow *win = [self th_getSafeKeyWindow];
-        [[win viewWithTag:TRACK_BTN_TAG] removeFromSuperview];
+        UIView *btn = [win viewWithTag:TRACK_BTN_TAG];
+        if (btn) {
+            [btn removeFromSuperview];
+            NSLog(@"TrackHook: 从非目标页面移除按钮");
+        }
     }
 }
 %end
@@ -334,7 +362,6 @@ static double g_initialDistance = -1.0;
 %hook NSURLSession
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *res, NSError *err))completionHandler {
     NSURLSessionDataTask *task = %orig(request, completionHandler);
-    // 【修复与优化】只拦截目标域名的请求，避免不必要的全局hook和线程安全问题
     if (request && [request.URL.host containsString:@"blued.cn"]) {
         NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
         if ([auth hasPrefix:@"Basic "]) {
@@ -343,6 +370,7 @@ static double g_initialDistance = -1.0;
                 [g_dataLock lock];
                 g_bluedBasicToken = [token copy];
                 [g_dataLock unlock];
+                NSLog(@"TrackHook: 已捕获到 Basic Token");
             }
         }
     }
@@ -350,8 +378,8 @@ static double g_initialDistance = -1.0;
 }
 %end
 
-// 初始化
 %ctor {
+    NSLog(@"TrackHook: 插件已加载 (Constructor)");
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         g_dataLock = [[NSLock alloc] init];
