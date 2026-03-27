@@ -270,7 +270,9 @@ static double g_initialDistance = -1.0;
 - (NSString *)extractUserIdFromUI {
     __block NSString *foundUid = nil;
     
-    void (^searchBlock)(UIView *) = ^(UIView *view) {
+    // 修复：先声明block变量，再定义block
+    __block void (^searchBlock)(UIView *);
+    searchBlock = ^(UIView *view) {
         if (!view || foundUid) return;
         
         if ([view isKindOfClass:[UILabel class]]) {
@@ -317,7 +319,9 @@ static double g_initialDistance = -1.0;
 - (double)extractDistanceFromUI {
     __block double foundDistance = -1.0;
     
-    void (^searchBlock)(UIView *) = ^(UIView *view) {
+    // 修复：先声明block变量，再定义block
+    __block void (^searchBlock)(UIView *);
+    searchBlock = ^(UIView *view) {
         if (!view || foundDistance > 0) return;
         
         if ([view isKindOfClass:[UILabel class]]) {
