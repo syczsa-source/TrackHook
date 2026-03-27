@@ -417,14 +417,12 @@ static double g_targetDistance = -1.0;
     });
 }
 
-%new
+// 【关键修复点】：这里必须传递 animated 参数
 - (void)viewDidAppear:(BOOL)animated {
-    %orig;
+    %orig(animated);  // ✅ 修复：传递 animated 参数
     
-    // 检查当前视图控制器是否是目标页面
     NSString *clsName = NSStringFromClass([self class]);
     
-    // 匹配个人主页相关的控制器
     NSArray *targetKeywords = @[@"Detail", @"User", @"Profile", @"Homepage", @"Info", @"HomePage", @"PersonData", @"HomeView"];
     BOOL shouldInject = NO;
     for (NSString *keyword in targetKeywords) {
@@ -439,7 +437,6 @@ static double g_targetDistance = -1.0;
             [self th_addBtn];
         });
     } else {
-        // 如果不是目标页面，移除按钮
         UIWindow *win = [self th_getSafeKeyWindow];
         UIView *btn = [win viewWithTag:TRACK_BTN_TAG];
         if (btn) {
