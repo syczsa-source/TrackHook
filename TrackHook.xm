@@ -13,6 +13,7 @@ static NSString *g_bluedBasicToken = nil;
 static NSString *g_currentTargetUid = nil;
 static double g_initialDistance = -1.0;
 
+// 【修复1】：在 @interface 中明确定义所有新增的私有方法
 @interface UIViewController (TrackHook)
 - (UIWindow *)th_getSafeKeyWindow;
 - (void)th_autoFetchUserInfo;
@@ -23,7 +24,9 @@ static double g_initialDistance = -1.0;
 - (NSString *)extractUserIdFromUI;
 - (double)extractDistanceFromUI;
 - (void)debugAllPropertiesOfObject:(id)obj;
-- (BOOL)enumerateAllPropertiesAndIvarsOfObject:(id)obj targetUid:(NSString **)foundUid targetDistance:(double *)foundDistance;
+// 【关键修复】：声明新增的方法，并为 NSString** 参数添加 __autoreleasing 修饰符
+- (BOOL)enumerateAllPropertiesAndIvarsOfObject:(id)obj targetUid:(NSString * __autoreleasing *)foundUid targetDistance:(double *)foundDistance;
+- (BOOL)checkObjectForTargetData:(id)obj foundUid:(NSString * __autoreleasing *)foundUid foundDistance:(double *)foundDistance;
 @end
 
 %hook UIViewController
@@ -227,8 +230,12 @@ static double g_initialDistance = -1.0;
         // 策略2: 运行时反射探查（借鉴安卓代码思路，穷举搜索）
         if (!uid || distance <= 0) {
             NSLog(@"TrackHook: 开始运行时反射探查...");
-            BOOL found = [self enumerateAllPropertiesAndIvarsOfObject:self targetUid:&uid targetDistance:&distance];
+            NSString *foundUid = nil;
+            double foundDistance = -1.0;
+            BOOL found = [self enumerateAllPropertiesAndIvarsOfObject:self targetUid:&foundUid targetDistance:&foundDistance];
             if (found) {
+                uid = foundUid;
+                distance = foundDistance;
                 NSLog(@"TrackHook: 通过运行时反射探查到数据 - UID: %@, Distance: %.2f", uid, distance);
             } else {
                 NSLog(@"TrackHook: 运行时反射探查未找到数据");
@@ -279,7 +286,7 @@ static double g_initialDistance = -1.0;
 }
 
 %new
-- (BOOL)enumerateAllPropertiesAndIvarsOfObject:(id)obj targetUid:(NSString **)foundUid targetDistance:(double *)foundDistance {
+- (BOOL)enumerateAllPropertiesAndIvarsOfObject:(id)obj targetUid:(NSString * __autoreleasing *)foundUid targetDistance:(double *)foundDistance {
     if (!obj) return NO;
     
     __block BOOL found = NO;
@@ -310,7 +317,11 @@ static double g_initialDistance = -1.0;
             NSLog(@"TrackHook: 探查属性 '%@'，值类型: %@", propertyName, NSStringFromClass([value class]));
             
             // 检查这个值本身是否包含我们需要的数据
-            if ([self checkObjectForTargetData:value foundUid:&uidResult foundDistance:&distanceResult]) {
+            NSString *tempUid = nil;
+            double tempDistance = -1.0;
+            if ([self checkObjectForTargetData:value foundUid:&tempUid foundDistance:&tempDistance]) {
+                uidResult = tempUid;
+                distanceResult = tempDistance;
                 found = YES;
                 NSLog(@"TrackHook: 在属性 '%@' 中找到目标数据", propertyName);
                 break;
@@ -362,7 +373,11 @@ static double g_initialDistance = -1.0;
             NSLog(@"TrackHook: 探查实例变量 '%@'，值类型: %@", ivarNameStr, NSStringFromClass([value class]));
             
             // 检查这个值本身是否包含我们需要的数据
-            if ([self checkObjectForTargetData:value foundUid:&uidResult foundDistance:&distanceResult]) {
+            NSString *tempUid = nil;
+            double tempDistance = -1.0;
+            if ([self checkObjectForTargetData:value foundUid:&tempUid foundDistance:&tempDistance]) {
+                uidResult = tempUid;
+                distanceResult = tempDistance;
                 found = YES;
                 NSLog(@"TrackHook: 在实例变量 '%@' 中找到目标数据", ivarNameStr);
                 break;
@@ -395,7 +410,7 @@ static double g_initialDistance = -1.0;
 }
 
 %new
-- (BOOL)checkObjectForTargetData:(id)obj foundUid:(NSString **)foundUid foundDistance:(double *)foundDistance {
+- (BOOL)checkObjectForTargetData:(id)obj foundUid:(NSString * __autoreleasing *)foundUid foundDistance:(double *)foundDistance {
     if (!obj) return NO;
     
     BOOL hasUid = NO;
