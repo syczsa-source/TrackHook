@@ -18,18 +18,14 @@ static UIWindow *g_floatWindow = nil;
 
 @implementation TrackHookWindow
 
-// 重写此方法，只让悬浮按钮接收事件，其他事件传递给下层窗口
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    // 1. 首先让系统处理（包括悬浮按钮）
     UIView *hitView = [super hitTest:point withEvent:event];
-    
-    // 2. 如果点击到了悬浮按钮，返回按钮
     UIView *btnView = [self viewWithTag:TRACK_BTN_TAG];
+    
     if (btnView && [btnView pointInside:[self convertPoint:point toView:btnView] withEvent:event]) {
-        return hitView; // 返回按钮，允许点击
+        return hitView;
     }
     
-    // 3. 其他情况返回nil，让事件传递给下层窗口
     return nil;
 }
 
@@ -157,69 +153,114 @@ static UIWindow *g_floatWindow = nil;
 
 %new
 - (NSString *)findUserIdInShareSheet {
+    NSLog(@"TrackHook: 🔍 开始在分享界面查找用户ID");
+    
     __block NSString *foundUid = nil;
-    UIWindow *keyWindow = [self th_getSafeKeyWindow];
     
-    if (!keyWindow) return nil;
+    // 搜索所有窗口
+    NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
+    NSLog(@"TrackHook: 发现 %lu 个窗口", (unsigned long)windows.count);
     
-    __block void (^__weak weakSearchBlock)(UIView *);
-    void (^searchBlock)(UIView *);
-    
-    weakSearchBlock = searchBlock = ^(UIView *view) {
-        if (!view || foundUid) return;
+    for (UIWindow *window in windows) {
+        if (window.hidden || window.alpha <= 0) continue;
         
-        if ([view isKindOfClass:[UILabel class]] || [view isKindOfClass:[UITextView class]]) {
-            NSString *text = nil;
-            if ([view isKindOfClass:[UILabel class]]) {
-                text = [(UILabel *)view text];
-            } else {
-                text = [(UITextView *)view text];
-            }
+        __block void (^__weak weakSearchBlock)(UIView *);
+        void (^searchBlock)(UIView *);
+        
+        weakSearchBlock = searchBlock = ^(UIView *view) {
+            if (!view || foundUid) return;
             
-            if (text && text.length > 0) {
-                // 记录所有扫描到的文本，用于调试
-                NSLog(@"TrackHook: 👀 扫描分享界面文本: '%@'", text);
+            // 检查所有包含文本的视图
+            if ([view isKindOfClass:[UILabel class]]) {
+                UILabel *label = (UILabel *)view;
+                NSString *text = label.text;
                 
-                NSArray *patterns = @[
-                    @"ID[:：]\\s*(\\d+)",      // ID: 478940426
-                    @"ID\\s*(\\d+)",           // ID478940426
-                    @"UID[:：]\\s*(\\d+)",     // UID: 478940426
-                    @"用户ID[:：]\\s*(\\d+)",  // 用户ID: 478940426
-                    @"用户编号[:：]\\s*(\\d+)", // 用户编号: 478940426
-                    @"\\d{6,}"                 // 纯数字（6位以上）
-                ];
-                
-                for (NSString *pattern in patterns) {
-                    NSError *error = nil;
-                    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern 
-                                                                                           options:NSRegularExpressionCaseInsensitive 
-                                                                                             error:&error];
-                    if (!error) {
-                        NSTextCheckingResult *match = [regex firstMatchInString:text 
-                                                                        options:0 
-                                                                          range:NSMakeRange(0, text.length)];
-                        if (match) {
-                            NSString *uid = [text substringWithRange:[match rangeAtIndex:1]];
-                            if (uid.length >= 6) {
-                                foundUid = uid;
-                                NSLog(@"TrackHook: ✅ 在分享界面找到用户ID: %@ (模式: %@)", uid, pattern);
-                                return;
+                if (text && text.length > 0) {
+                    // 记录所有文本用于调试
+                    if ([text containsString:@"ID"] || [text containsString:@"558289410"]) {
+                        NSLog(@"TrackHook: 👀 扫描到相关文本: '%@' (类: %@)", text, NSStringFromClass([view class]));
+                    }
+                    
+                    // 【关键修复】针对您截图中的具体格式
+                    // 匹配 "ID:558289410" 这种格式
+                    NSArray *patterns = @[
+                        @"ID\\s*[:：]\\s*(\\d+)",           // ID:558289410
+                        @"^ID\\s*[:：]\\s*(\\d+)$",         // 单独一行的ID
+                        @"用户ID\\s*[:：]\\s*(\\d+)",       // 用户ID:558289410
+                        @"UID\\s*[:：]\\s*(\\d+)",          // UID:558289410
+                        @"\\b(\\d{6,10})\\b"               // 6-10位纯数字
+                    ];
+                    
+                    for (NSString *pattern in patterns) {
+                        NSError *error = nil;
+                        NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern 
+                                                                                               options:NSRegularExpressionCaseInsensitive 
+                                                                                                 error:&error];
+                        if (!error) {
+                            NSTextCheckingResult *match = [regex firstMatchInString:text 
+                                                                            options:0 
+                                                                              range:NSMakeRange(0, text.length)];
+                            if (match) {
+                                NSString *uid = [text substringWithRange:[match rangeAtIndex:1]];
+                                if (uid.length >= 6) {
+                                    foundUid = uid;
+                                    NSLog(@"TrackHook: ✅ 在分享界面找到用户ID: %@ (模式: %@)", uid, pattern);
+                                    return;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        
-        for (UIView *subview in view.subviews) {
-            if (weakSearchBlock) {
-                weakSearchBlock(subview);
+            // 也检查UITextView
+            else if ([view isKindOfClass:[UITextView class]]) {
+                UITextView *textView = (UITextView *)view;
+                NSString *text = textView.text;
+                
+                if (text && text.length > 0) {
+                    if ([text containsString:@"ID"] || [text containsString:@"558289410"]) {
+                        NSLog(@"TrackHook: 👀 在UITextView中扫描到文本: '%@'", text);
+                    }
+                    
+                    NSArray *patterns = @[@"ID\\s*[:：]\\s*(\\d+)"];
+                    for (NSString *pattern in patterns) {
+                        NSError *error = nil;
+                        NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern 
+                                                                                               options:NSRegularExpressionCaseInsensitive 
+                                                                                                 error:&error];
+                        if (!error) {
+                            NSTextCheckingResult *match = [regex firstMatchInString:text 
+                                                                            options:0 
+                                                                              range:NSMakeRange(0, text.length)];
+                            if (match) {
+                                NSString *uid = [text substringWithRange:[match rangeAtIndex:1]];
+                                if (uid.length >= 6) {
+                                    foundUid = uid;
+                                    NSLog(@"TrackHook: ✅ 在UITextView中找到用户ID: %@", uid);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            if (foundUid) break;
-        }
-    };
+            
+            // 递归搜索子视图
+            for (UIView *subview in view.subviews) {
+                if (weakSearchBlock) {
+                    weakSearchBlock(subview);
+                }
+                if (foundUid) break;
+            }
+        };
+        
+        searchBlock(window);
+        if (foundUid) break;
+    }
     
-    searchBlock(keyWindow);
+    if (!foundUid) {
+        NSLog(@"TrackHook: ❌ 在分享界面未找到用户ID");
+    }
     
     return foundUid;
 }
@@ -240,6 +281,8 @@ static UIWindow *g_floatWindow = nil;
             
             if (text && text.length > 0) {
                 if ([text containsString:@"ID:"]) {
+                    NSLog(@"TrackHook: 👀 在个人主页发现ID文本: '%@'", text);
+                    
                     NSError *error = nil;
                     NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"ID[:：]\\s*(\\d+)" 
                                                                                            options:NSRegularExpressionCaseInsensitive 
@@ -273,6 +316,8 @@ static UIWindow *g_floatWindow = nil;
 
 %new
 - (NSString *)findUserIdGlobally {
+    NSLog(@"TrackHook: 🌍 开始全局搜索用户ID");
+    
     __block NSString *foundUid = nil;
     UIWindow *keyWindow = [self th_getSafeKeyWindow];
     
@@ -289,8 +334,9 @@ static UIWindow *g_floatWindow = nil;
             NSString *text = label.text;
             
             if (text && text.length > 0) {
+                // 查找6-10位数字
                 NSError *error = nil;
-                NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\d{6,}" 
+                NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\b(\\d{6,10})\\b" 
                                                                                        options:0 
                                                                                          error:&error];
                 if (!error) {
@@ -299,8 +345,9 @@ static UIWindow *g_floatWindow = nil;
                                                                      range:NSMakeRange(0, text.length)];
                     if (match) {
                         NSString *uid = [text substringWithRange:match.range];
-                        if (uid.length >= 6 && uid.length <= 9) {
+                        if (uid.length >= 6 && uid.length <= 10) {
                             NSString *context = text.lowercaseString;
+                            // 排除常见干扰
                             if (![context containsString:@"km"] && 
                                 ![context containsString:@"m"] && 
                                 ![context containsString:@"kg"] &&
@@ -309,10 +356,11 @@ static UIWindow *g_floatWindow = nil;
                                 ![context containsString:@"年"] &&
                                 ![context containsString:@"月"] &&
                                 ![context containsString:@"日"] &&
-                                ![context containsString:@":"] &&
-                                ![context containsString:@"."]) {
+                                ![context containsString:@"%"] &&
+                                ![context containsString:@"¥"] &&
+                                ![context containsString:@"￥"]) {
                                 foundUid = uid;
-                                NSLog(@"TrackHook: ✅ 全局搜索找到用户ID: %@", foundUid);
+                                NSLog(@"TrackHook: ✅ 全局搜索找到用户ID: %@ (文本: %@)", foundUid, text);
                                 return;
                             }
                         }
@@ -356,7 +404,7 @@ static UIWindow *g_floatWindow = nil;
     NSLog(@"TrackHook: 🎨 准备添加悬浮按钮");
     
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 1. 获取当前活跃的窗口场景（WindowScene），这对于多窗口应用至关重要
+        // 1. 获取当前活跃的窗口场景
         UIWindowScene *targetScene = nil;
         if (@available(iOS 13.0, *)) {
             for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -374,23 +422,20 @@ static UIWindow *g_floatWindow = nil;
         
         // 2. 创建或更新独立的悬浮窗口
         if (!g_floatWindow || g_floatWindow.windowScene != targetScene) {
-            // 如果窗口不存在，或不属于当前活跃的场景，则重新创建
             CGRect screenBounds = targetScene.coordinateSpace.bounds;
-            
-            // 【关键修复】使用自定义窗口类
             g_floatWindow = [[TrackHookWindow alloc] initWithFrame:screenBounds];
             g_floatWindow.windowScene = targetScene;
-            g_floatWindow.windowLevel = UIWindowLevelStatusBar + 10; // 适度调整窗口层级
+            g_floatWindow.windowLevel = UIWindowLevelStatusBar + 10;
             g_floatWindow.backgroundColor = [UIColor clearColor];
             g_floatWindow.rootViewController = [UIViewController new];
             g_floatWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
-            g_floatWindow.userInteractionEnabled = YES; // 允许交互
+            g_floatWindow.userInteractionEnabled = YES;
             g_floatWindow.hidden = NO;
             
-            NSLog(@"TrackHook: 🪟 已创建/更新独立悬浮窗口 (使用TrackHookWindow)");
+            NSLog(@"TrackHook: 🪟 已创建独立悬浮窗口");
         }
         
-        // 3. 移除旧按钮（如果存在）
+        // 3. 移除旧按钮
         UIButton *oldBtn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
         if (oldBtn) {
             [oldBtn removeFromSuperview];
@@ -410,7 +455,7 @@ static UIWindow *g_floatWindow = nil;
         btn.layer.shadowColor = [UIColor blackColor].CGColor;
         btn.layer.shadowOffset = CGSizeMake(0, 2);
         btn.layer.shadowOpacity = 0.3;
-        btn.userInteractionEnabled = YES; // 确保按钮可交互
+        btn.userInteractionEnabled = YES;
         
         [btn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
@@ -418,7 +463,7 @@ static UIWindow *g_floatWindow = nil;
         
         [g_floatWindow addSubview:btn];
         
-        NSLog(@"TrackHook: ✅ 悬浮按钮已添加到独立窗口 (窗口可穿透点击)");
+        NSLog(@"TrackHook: ✅ 悬浮按钮已添加到独立窗口");
     });
 }
 
@@ -429,7 +474,6 @@ static UIWindow *g_floatWindow = nil;
     v.center = CGPointMake(v.center.x + translation.x, v.center.y + translation.y);
     [pan setTranslation:CGPointZero inView:v.superview];
     
-    // 限制在窗口内
     CGFloat margin = 28;
     CGRect safeArea = v.superview.bounds;
     v.center = CGPointMake(MAX(margin, MIN(safeArea.size.width - margin, v.center.x)),
@@ -439,7 +483,6 @@ static UIWindow *g_floatWindow = nil;
 %new
 - (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur {
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 在独立窗口上显示toast
         if (!g_floatWindow) {
             g_floatWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
             g_floatWindow.windowLevel = UIWindowLevelStatusBar + 1;
@@ -497,7 +540,6 @@ static UIWindow *g_floatWindow = nil;
             [self th_addBtn];
         });
     } else {
-        // 在非目标页面，隐藏按钮但保留窗口
         if (g_floatWindow) {
             UIView *btn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
             if (btn) {
