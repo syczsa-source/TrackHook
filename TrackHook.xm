@@ -23,6 +23,7 @@ static double g_initialDistance = -1.0;
 - (NSString *)extractUserIdFromUI;
 - (double)extractDistanceFromUI;
 - (void)debugAllPropertiesOfObject:(id)obj;
+- (BOOL)enumerateAllPropertiesAndIvarsOfObject:(id)obj targetUid:(NSString **)foundUid targetDistance:(double *)foundDistance;
 @end
 
 %hook UIViewController
@@ -168,7 +169,7 @@ static double g_initialDistance = -1.0;
         NSString *uid = nil;
         double distance = -1.0;
         
-        // 策略1: 从控制器属性获取
+        // 策略1: 从控制器属性获取（已知常见属性名，快速通道）
         NSArray *controllerProps = @[@"userModel", @"user", @"targetUser", @"personData", @"homePageData", @"dataItem", @"model", @"data"];
         id potentialModel = nil;
         
@@ -223,7 +224,18 @@ static double g_initialDistance = -1.0;
             }
         }
         
-        // 策略2: 如果属性获取失败，尝试从UI文本中提取
+        // 策略2: 运行时反射探查（借鉴安卓代码思路，穷举搜索）
+        if (!uid || distance <= 0) {
+            NSLog(@"TrackHook: 开始运行时反射探查...");
+            BOOL found = [self enumerateAllPropertiesAndIvarsOfObject:self targetUid:&uid targetDistance:&distance];
+            if (found) {
+                NSLog(@"TrackHook: 通过运行时反射探查到数据 - UID: %@, Distance: %.2f", uid, distance);
+            } else {
+                NSLog(@"TrackHook: 运行时反射探查未找到数据");
+            }
+        }
+        
+        // 策略3: 如果反射获取失败，尝试从UI文本中提取
         if (!uid || uid.length == 0) {
             NSString *extractedUid = [self extractUserIdFromUI];
             if (extractedUid && extractedUid.length > 0) {
@@ -264,6 +276,182 @@ static double g_initialDistance = -1.0;
     }
     
     NSLog(@"TrackHook: 数据获取失败");
+}
+
+%new
+- (BOOL)enumerateAllPropertiesAndIvarsOfObject:(id)obj targetUid:(NSString **)foundUid targetDistance:(double *)foundDistance {
+    if (!obj) return NO;
+    
+    __block BOOL found = NO;
+    __block NSString *uidResult = nil;
+    __block double distanceResult = -1.0;
+    
+    // 1. 遍历当前对象的所有属性
+    unsigned int propCount = 0;
+    objc_property_t *properties = class_copyPropertyList([obj class], &propCount);
+    
+    for (unsigned int i = 0; i < propCount; i++) {
+        const char *propName = property_getName(properties[i]);
+        NSString *propertyName = [NSString stringWithUTF8String:propName];
+        
+        @try {
+            // 跳过明显的系统属性
+            if ([propertyName hasPrefix:@"_"] || 
+                [propertyName isEqualToString:@"description"] || 
+                [propertyName isEqualToString:@"debugDescription"] ||
+                [propertyName isEqualToString:@"hash"] ||
+                [propertyName isEqualToString:@"superclass"]) {
+                continue;
+            }
+            
+            id value = [obj valueForKey:propertyName];
+            if (!value || value == [NSNull null]) continue;
+            
+            NSLog(@"TrackHook: 探查属性 '%@'，值类型: %@", propertyName, NSStringFromClass([value class]));
+            
+            // 检查这个值本身是否包含我们需要的数据
+            if ([self checkObjectForTargetData:value foundUid:&uidResult foundDistance:&distanceResult]) {
+                found = YES;
+                NSLog(@"TrackHook: 在属性 '%@' 中找到目标数据", propertyName);
+                break;
+            }
+            
+            // 递归检查嵌套对象（深度限制为2，避免无限递归）
+            if (!found && [value isKindOfClass:[NSObject class]] && 
+                ![value isKindOfClass:[NSString class]] && 
+                ![value isKindOfClass:[NSNumber class]] &&
+                ![value isKindOfClass:[NSArray class]] && 
+                ![value isKindOfClass:[NSDictionary class]]) {
+                // 避免循环引用，这里简单判断不是UIKit基础类
+                if (![NSStringFromClass([value class]) hasPrefix:@"UI"] && 
+                    ![NSStringFromClass([value class]) hasPrefix:@"NS"]) {
+                    found = [self enumerateAllPropertiesAndIvarsOfObject:value targetUid:&uidResult targetDistance:&distanceResult];
+                    if (found) break;
+                }
+            }
+        } @catch (NSException *e) {
+            // 忽略无法访问的属性
+        }
+    }
+    free(properties);
+    
+    if (found) {
+        if (foundUid) *foundUid = uidResult;
+        if (foundDistance) *foundDistance = distanceResult;
+        return YES;
+    }
+    
+    // 2. 遍历当前对象的所有实例变量
+    unsigned int ivarCount = 0;
+    Ivar *ivars = class_copyIvarList([obj class], &ivarCount);
+    
+    for (unsigned int i = 0; i < ivarCount; i++) {
+        Ivar ivar = ivars[i];
+        const char *ivarName = ivar_getName(ivar);
+        if (!ivarName) continue;
+        
+        NSString *ivarNameStr = [NSString stringWithUTF8String:ivarName];
+        
+        @try {
+            // 跳过明显的系统变量
+            if ([ivarNameStr hasPrefix:@"_"]) continue;
+            
+            id value = object_getIvar(obj, ivar);
+            if (!value || value == [NSNull null]) continue;
+            
+            NSLog(@"TrackHook: 探查实例变量 '%@'，值类型: %@", ivarNameStr, NSStringFromClass([value class]));
+            
+            // 检查这个值本身是否包含我们需要的数据
+            if ([self checkObjectForTargetData:value foundUid:&uidResult foundDistance:&distanceResult]) {
+                found = YES;
+                NSLog(@"TrackHook: 在实例变量 '%@' 中找到目标数据", ivarNameStr);
+                break;
+            }
+            
+            // 递归检查嵌套对象
+            if (!found && [value isKindOfClass:[NSObject class]] && 
+                ![value isKindOfClass:[NSString class]] && 
+                ![value isKindOfClass:[NSNumber class]] &&
+                ![value isKindOfClass:[NSArray class]] && 
+                ![value isKindOfClass:[NSDictionary class]]) {
+                if (![NSStringFromClass([value class]) hasPrefix:@"UI"] && 
+                    ![NSStringFromClass([value class]) hasPrefix:@"NS"]) {
+                    found = [self enumerateAllPropertiesAndIvarsOfObject:value targetUid:&uidResult targetDistance:&distanceResult];
+                    if (found) break;
+                }
+            }
+        } @catch (NSException *e) {
+            // 忽略无法访问的变量
+        }
+    }
+    free(ivars);
+    
+    if (found) {
+        if (foundUid) *foundUid = uidResult;
+        if (foundDistance) *foundDistance = distanceResult;
+    }
+    
+    return found;
+}
+
+%new
+- (BOOL)checkObjectForTargetData:(id)obj foundUid:(NSString **)foundUid foundDistance:(double *)foundDistance {
+    if (!obj) return NO;
+    
+    BOOL hasUid = NO;
+    BOOL hasDistance = NO;
+    NSString *uid = nil;
+    double distance = -1.0;
+    
+    // 检查可能的UID属性
+    NSArray *idKeys = @[@"uid", @"userId", @"userID", @"user_id", @"id", @"ID"];
+    for (NSString *key in idKeys) {
+        @try {
+            if ([obj respondsToSelector:NSSelectorFromString(key)]) {
+                id value = [obj valueForKey:key];
+                if (value && value != [NSNull null]) {
+                    uid = [NSString stringWithFormat:@"%@", value];
+                    hasUid = YES;
+                    NSLog(@"TrackHook: 在对象 %@ 中发现UID字段 '%@': %@", NSStringFromClass([obj class]), key, uid);
+                    break;
+                }
+            }
+        } @catch (NSException *e) {}
+    }
+    
+    // 检查可能的距离属性
+    NSArray *distKeys = @[@"distance", @"dis", @"dist", @"range", @"km"];
+    for (NSString *key in distKeys) {
+        @try {
+            if ([obj respondsToSelector:NSSelectorFromString(key)]) {
+                id value = [obj valueForKey:key];
+                if (value && [value isKindOfClass:[NSNumber class]]) {
+                    distance = [value doubleValue];
+                    hasDistance = YES;
+                    NSLog(@"TrackHook: 在对象 %@ 中发现距离字段 '%@': %.2f", NSStringFromClass([obj class]), key, distance);
+                    break;
+                }
+            }
+        } @catch (NSException *e) {}
+    }
+    
+    if (hasUid && hasDistance && distance > 0) {
+        if (foundUid) *foundUid = uid;
+        if (foundDistance) *foundDistance = distance;
+        
+        // 找到完整数据，进行深度分析以便后续优化
+        NSLog(@"TrackHook: 发现完整数据对象，类名: %@", NSStringFromClass([obj class]));
+        [self debugAllPropertiesOfObject:obj];
+        return YES;
+    } else if (hasUid || hasDistance) {
+        // 只找到部分数据，也记录下来
+        if (hasUid && foundUid) *foundUid = uid;
+        if (hasDistance && foundDistance) *foundDistance = distance;
+        NSLog(@"TrackHook: 发现部分数据对象，类名: %@, 有UID: %@, 有距离: %.2f", 
+              NSStringFromClass([obj class]), hasUid ? @"是" : @"否", distance);
+    }
+    
+    return NO;
 }
 
 %new
