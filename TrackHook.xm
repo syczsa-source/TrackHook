@@ -386,7 +386,8 @@ static UIWindow *g_floatWindow = nil;
         btn.layer.shadowOffset = CGSizeMake(0, 2);
         btn.layer.shadowOpacity = 0.3;
         
-        [btn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIEventTouchUpInside];
+        // 【关键修复】: 将 UIEventTouchUpInside 改为 UIControlEventTouchUpInside
+        [btn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
         [btn addGestureRecognizer:pan];
         
