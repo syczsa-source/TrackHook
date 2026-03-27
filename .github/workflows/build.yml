@@ -69,13 +69,16 @@ jobs:
           make clean 2>/dev/null || true
           rm -rf .theos packages 2>/dev/null || true
 
-- name: Build & Package
+      - name: Build & Package
         run: |
           export PATH="/usr/local/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
           export THEOS=$THEOS
           
-          # 核心修复：在打包前，强制清除 control 文件里的 Windows 换行符 (\r)
+          # 【核心修复：解决 Error 25】强制将 control 文件转换为 Unix 换行符
           sed -i '' 's/\r$//' control
+          # 同时处理其他可能受影响的配置文件
+          sed -i '' 's/\r$//' Makefile
+          sed -i '' 's/\r$//' *.plist 2>/dev/null || true
           
           make package FINALPACKAGE=1 CODESIGN_IPA=0 V=1
           
