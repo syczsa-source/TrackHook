@@ -270,9 +270,11 @@ static double g_initialDistance = -1.0;
 - (NSString *)extractUserIdFromUI {
     __block NSString *foundUid = nil;
     
-    // 修复：先声明block变量，再定义block
-    __block void (^searchBlock)(UIView *);
-    searchBlock = ^(UIView *view) {
+    // 修复循环引用：使用 __weak 引用自身
+    __block void (^__weak weakSearchBlock)(UIView *);
+    void (^searchBlock)(UIView *);
+    
+    weakSearchBlock = searchBlock = ^(UIView *view) {
         if (!view || foundUid) return;
         
         if ([view isKindOfClass:[UILabel class]]) {
@@ -306,7 +308,10 @@ static double g_initialDistance = -1.0;
         }
         
         for (UIView *subview in view.subviews) {
-            searchBlock(subview);
+            // 调用弱引用自身，避免循环引用
+            if (weakSearchBlock) {
+                weakSearchBlock(subview);
+            }
             if (foundUid) break;
         }
     };
@@ -319,9 +324,11 @@ static double g_initialDistance = -1.0;
 - (double)extractDistanceFromUI {
     __block double foundDistance = -1.0;
     
-    // 修复：先声明block变量，再定义block
-    __block void (^searchBlock)(UIView *);
-    searchBlock = ^(UIView *view) {
+    // 修复循环引用：使用 __weak 引用自身
+    __block void (^__weak weakSearchBlock)(UIView *);
+    void (^searchBlock)(UIView *);
+    
+    weakSearchBlock = searchBlock = ^(UIView *view) {
         if (!view || foundDistance > 0) return;
         
         if ([view isKindOfClass:[UILabel class]]) {
@@ -340,7 +347,10 @@ static double g_initialDistance = -1.0;
         }
         
         for (UIView *subview in view.subviews) {
-            searchBlock(subview);
+            // 调用弱引用自身，避免循环引用
+            if (weakSearchBlock) {
+                weakSearchBlock(subview);
+            }
             if (foundDistance > 0) break;
         }
     };
