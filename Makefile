@@ -11,7 +11,7 @@ include $(THEOS)/makefiles/common.mk
 
 # 项目名称
 TWEAK_NAME = TrackHook
-TrackHook_FILES = Tweak.xm
+TrackHook_FILES = TrackHook.xm
 
 # 框架依赖
 TrackHook_FRAMEWORKS = UIKit Foundation CoreLocation
