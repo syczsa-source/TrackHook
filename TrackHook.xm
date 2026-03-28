@@ -82,7 +82,7 @@ static UIWindow *g_floatWindow = nil;
     double distance = g_targetDistance;
     [g_dataLock unlock];
     
-    NSLog(@"TrackHook: 📊 点击时数据快照:");
+    NSLog(@"TrackHook: 📊 点击时数据状态:");
     NSLog(@"TrackHook:   Token: %@", currentToken ? @"<已获取>" : @"<空>");
     NSLog(@"TrackHook:   用户ID: %@", currentUid ?: @"<空>");
     NSLog(@"TrackHook:   坐标: (%.6f, %.6f)", lat, lng);
@@ -113,7 +113,7 @@ static UIWindow *g_floatWindow = nil;
         return;
     }
     if (!basicToken) {
-        [self th_showToast:@"缺少认证令牌\n请先刷新页面或浏览动态" duration:3.0];
+        [self th_showToast:@"缺少认证令牌\n请刷新用户动态或下拉页面" duration:3.0];
         NSLog(@"TrackHook: ⚠️ Token可能已过期，请重新操作获取新Token");
         return;
     }
@@ -468,66 +468,72 @@ static UIWindow *g_floatWindow = nil;
             NSString *urlString = [request.URL absoluteString];
             NSString *host = request.URL.host;
             
-            // 【关键修复】扩展主机名检查范围
+            // 【关键优化】更宽松的匹配规则
+            BOOL shouldProcess = NO;
             if (host) {
                 NSString *lowercaseHost = [host lowercaseString];
-                BOOL isTargetHost = ([lowercaseHost containsString:@"blued"] || 
-                                     [lowercaseHost containsString:@"irisgw"] || 
-                                     [host containsString:@"198.18.3"] ||  // 匹配您截图中的IP
-                                     [lowercaseHost containsString:@"argo.blued"] ||  // 之前看到的域名
-                                     [lowercaseHost hasSuffix:@".blued.cn"] ||  // 所有blued.cn子域
-                                     [lowercaseHost hasSuffix:@".irisgw.cn"]);  // 所有irisgw.cn子域
+                // 匹配所有可能的目标请求
+                shouldProcess = ([lowercaseHost containsString:@"blued"] || 
+                               [lowercaseHost containsString:@"irisgw"] || 
+                               [host containsString:@"198.18"] ||  // 匹配您截图中的IP段
+                               [urlString containsString:@"/users/"] ||  // 用户相关API
+                               [urlString containsString:@"lat="] ||  // 包含坐标的请求
+                               [urlString containsString:@"timeline"]);  // 时间线请求
+            }
+            
+            if (shouldProcess) {
+                // 打印所有匹配的请求用于调试
+                NSLog(@"TrackHook: 🔄 处理请求: %@ (主机: %@)", urlString, host);
                 
-                if (isTargetHost) {
-                    NSLog(@"TrackHook: 🌐 捕获到请求: %@ (主机: %@)", urlString, host);
-                    
-                    // === 捕获 Basic Token ===
-                    NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
-                    if (auth && [auth hasPrefix:@"Basic "]) {
-                        NSString *token = [auth substringFromIndex:6];
-                        if (token.length > 0) {
-                            [g_dataLock lock];
-                            g_bluedBasicToken = [token copy];
-                            [g_dataLock unlock];
-                            NSLog(@"TrackHook: ✅ 已捕获到 Basic Token (长度: %lu)", (unsigned long)token.length);
-                        }
+                // === 捕获 Basic Token ===
+                NSDictionary *headers = request.allHTTPHeaderFields;
+                NSString *auth = headers[@"Authorization"];
+                if (auth && [auth hasPrefix:@"Basic "]) {
+                    NSString *token = [auth substringFromIndex:6];
+                    if (token.length > 0) {
+                        [g_dataLock lock];
+                        g_bluedBasicToken = [token copy];
+                        [g_dataLock unlock];
+                        NSLog(@"TrackHook: ✅ 捕获到Token，长度: %lu", (unsigned long)token.length);
                     }
-                    
-                    // === 从 timeline 请求中提取坐标 ===
-                    if ([urlString containsString:@"lat="] || [urlString containsString:@"latitude="] || 
-                        [urlString containsString:@"/timeline"]) {
-                        NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
-                        for (NSURLQueryItem *item in components.queryItems) {
-                            if ([item.name isEqualToString:@"lat"] || [item.name isEqualToString:@"latitude"]) {
-                                double lat = [item.value doubleValue];
-                                if (fabs(lat) > 0.001) {
-                                    [g_dataLock lock];
-                                    g_currentLat = lat;
-                                    [g_dataLock unlock];
-                                    NSLog(@"TrackHook: 📍 从请求捕获纬度: %.6f", lat);
-                                }
-                            } else if ([item.name isEqualToString:@"lot"] || [item.name isEqualToString:@"lon"] || 
-                                      [item.name isEqualToString:@"longitude"]) {
-                                double lng = [item.value doubleValue];
-                                if (fabs(lng) > 0.001) {
-                                    [g_dataLock lock];
-                                    g_currentLng = lng;
-                                    [g_dataLock unlock];
-                                    NSLog(@"TrackHook: 📍 从请求捕获经度: %.6f", lng);
-                                }
+                } else if (auth) {
+                    NSLog(@"TrackHook: ⚠️ 有Authorization头但不是Basic: %@", [auth substringToIndex:MIN(20, auth.length)]);
+                }
+                
+                // === 从 timeline 请求中提取坐标 ===
+                if ([urlString containsString:@"lat="] || [urlString containsString:@"latitude="] || 
+                    [urlString containsString:@"/timeline"]) {
+                    NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
+                    for (NSURLQueryItem *item in components.queryItems) {
+                        if ([item.name isEqualToString:@"lat"] || [item.name isEqualToString:@"latitude"]) {
+                            double lat = [item.value doubleValue];
+                            if (fabs(lat) > 0.001) {
+                                [g_dataLock lock];
+                                g_currentLat = lat;
+                                [g_dataLock unlock];
+                                NSLog(@"TrackHook: 📍 捕获纬度: %.6f", lat);
+                            }
+                        } else if ([item.name isEqualToString:@"lot"] || [item.name isEqualToString:@"lon"] || 
+                                  [item.name isEqualToString:@"longitude"]) {
+                            double lng = [item.value doubleValue];
+                            if (fabs(lng) > 0.001) {
+                                [g_dataLock lock];
+                                g_currentLng = lng;
+                                [g_dataLock unlock];
+                                NSLog(@"TrackHook: 📍 捕获经度: %.6f", lng);
                             }
                         }
                     }
-                    
-                    // === 从网络响应中提取距离信息 ===
-                    @try {
-                        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                        if (json) {
-                            [self extractDistanceFromJSON:json url:urlString];
-                        }
-                    } @catch (NSException *exception) {
-                        // 忽略解析错误
+                }
+                
+                // === 从网络响应中提取距离信息 ===
+                @try {
+                    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if (json) {
+                        [self extractDistanceFromJSON:json url:urlString];
                     }
+                } @catch (NSException *exception) {
+                    // 忽略解析错误
                 }
             }
         }
@@ -556,7 +562,7 @@ static UIWindow *g_floatWindow = nil;
                     [g_dataLock lock];
                     g_targetDistance = distance;
                     [g_dataLock unlock];
-                    NSLog(@"TrackHook: 📏 从JSON提取到距离: %.2f km", distance);
+                    NSLog(@"TrackHook: 📏 提取到距离: %.2f km", distance);
                     return;
                 }
             }
@@ -571,7 +577,7 @@ static UIWindow *g_floatWindow = nil;
                     [g_dataLock lock];
                     g_targetDistance = distance;
                     [g_dataLock unlock];
-                    NSLog(@"TrackHook: 📏 从location字段提取到距离: %.2f km", distance);
+                    NSLog(@"TrackHook: 📏 从location提取距离: %.2f km", distance);
                     return;
                 }
             }
