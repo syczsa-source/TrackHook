@@ -24,7 +24,7 @@ TrackHook_LDFLAGS = -undefined dynamic_lookup
 # 忽略并行构建提示
 THEOS_IGNORE_PARALLEL_BUILDING_NOTICE = yes
 
-include $(THEOS_MAKE_PATH)/tweak.mk
+include $(THEOS_MAKE_PATH)TrackHook.mk
 
 # 安装后重启SpringBoard
 after-install::
