@@ -1,7 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <Network/Network.h>  // 添加Network框架
 
 #define TRACK_BTN_TAG 100001
 #define BLUED_BUNDLE_ID @"com.bluecity.blued"
@@ -30,238 +29,47 @@ static UIWindow *g_floatWindow = nil;
 @end
 // ==================== 自定义窗口类结束 ====================
 
-// ==================== 核心修复：Hook CFNetwork ====================
-// 根据您的日志截图，Blued使用的是CFNetwork/Network.framework
-// 我们需要Hook更底层的网络请求
+// ==================== 核心修复：正确的类别方法声明 ====================
+// 根据文档第3.2.3节，必须在hook之前声明所有类别方法
 
-%hook NSMutableURLRequest
+@interface UIViewController (TrackHookMethods)
+- (UIWindow *)th_getSafeKeyWindow;
+- (void)th_onBtnClick;
+- (NSString *)extractUserIdFromUI;
+- (void)th_addBtn;
+- (void)th_handlePan:(UIPanGestureRecognizer *)pan;
+- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
+- (void)searchViewHierarchy:(UIView *)view result:(NSString * __strong * __strong)result;
+@end
 
-- (void)setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
-    NSLog(@"TrackHook: 🏷️ 设置HTTP头字段: %@ = %@", field, value);
-    
-    // 捕获Authorization头
-    if ([field isEqualToString:@"Authorization"] && [value hasPrefix:@"Basic "]) {
-        NSString *token = [value substringFromIndex:6]; // 移除"Basic "前缀
-        [g_dataLock lock];
-        g_bluedBasicToken = [token copy];
-        [g_dataLock unlock];
-        NSLog(@"TrackHook: ✅ 捕获到Basic Token (长度: %lu)", (unsigned long)token.length);
-    }
-    
-    %orig(value, field);
-}
+@interface NSURLSession (TrackHookMethods)
+- (void)extractDistanceFromJSON:(NSDictionary *)json;
+- (void)extractUserIdFromJSON:(NSDictionary *)json;
+- (void)deepSearchDistanceInObject:(id)obj;
+- (void)deepSearchUserIdInObject:(id)obj;
+@end
+// ==================== 类别声明结束 ====================
 
-%end
-
-%hook NSURLConnection
-
-+ (NSData *)sendSynchronousRequest:(NSURLRequest *)request returningResponse:(NSURLResponse * _Nullable *)response error:(NSError * _Nullable *)error {
-    NSLog(@"TrackHook: 🔄 同步请求: %@", request.URL.absoluteString);
-    
-    // 提取Token
-    NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
-    if (auth && [auth hasPrefix:@"Basic "]) {
-        NSString *token = [auth substringFromIndex:6];
-        [g_dataLock lock];
-        g_bluedBasicToken = [token copy];
-        [g_dataLock unlock];
-        NSLog(@"TrackHook: ✅ 从同步请求捕获Token: %@...", [token substringToIndex:MIN(20, token.length)]);
-    }
-    
-    return %orig(request, response, error);
-}
-
-%end
-
-%hook NSURLSession
-
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *res, NSError *err))completionHandler {
-    
-    NSLog(@"TrackHook: 📡 捕获NSURLSession请求: %@", request.URL.absoluteString);
-    
-    // 记录请求头
-    NSDictionary *headers = request.allHTTPHeaderFields;
-    NSLog(@"TrackHook: 📋 请求头: %@", headers);
-    
-    // 提取Authorization
-    NSString *auth = headers[@"Authorization"];
-    if (auth && [auth hasPrefix:@"Basic "]) {
-        NSString *token = [auth substringFromIndex:6];
-        [g_dataLock lock];
-        g_bluedBasicToken = [token copy];
-        [g_dataLock unlock];
-        NSLog(@"TrackHook: ✅ 从NSURLSession捕获Token (长度: %lu)", (unsigned long)token.length);
-    }
-    
-    // 提取URL参数
-    NSString *urlString = request.URL.absoluteString;
-    NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
-    for (NSURLQueryItem *item in components.queryItems) {
-        if ([item.name isEqualToString:@"lat"] || [item.name isEqualToString:@"latitude"]) {
-            double lat = [item.value doubleValue];
-            if (fabs(lat) > 0.001) {
-                [g_dataLock lock];
-                g_currentLat = lat;
-                [g_dataLock unlock];
-                NSLog(@"TrackHook: 📍 提取纬度: %.6f", lat);
-            }
-        } else if ([item.name isEqualToString:@"lot"] || [item.name isEqualToString:@"lon"] || 
-                  [item.name isEqualToString:@"longitude"]) {
-            double lng = [item.value doubleValue];
-            if (fabs(lng) > 0.001) {
-                [g_dataLock lock];
-                g_currentLng = lng;
-                [g_dataLock unlock];
-                NSLog(@"TrackHook: 📍 提取经度: %.6f", lng);
-            }
-        }
-    }
-    
-    // 创建自定义的completion handler
-    void (^customCompletionHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (completionHandler) {
-            completionHandler(data, response, error);
-        }
-        
-        // 处理响应数据
-        if (data && data.length > 0) {
-            @try {
-                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                if (json) {
-                    [self extractDistanceFromJSON:json];
-                    [self extractUserIdFromJSON:json];
-                }
-            } @catch (NSException *exception) {
-                NSLog(@"TrackHook: ❌ JSON解析异常: %@", exception);
-            }
-        }
-    };
-    
-    return %orig(request, customCompletionHandler);
-}
-
-%new
-- (void)extractDistanceFromJSON:(NSDictionary *)json {
-    [self deepSearchDistanceInObject:json];
-}
-
-%new
-- (void)deepSearchDistanceInObject:(id)obj {
-    if (!obj) return;
-    
-    if ([obj isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *dict = (NSDictionary *)obj;
-        
-        // 搜索距离字段
-        for (NSString *key in dict.allKeys) {
-            if ([key.lowercaseString containsString:@"distance"] || 
-                [key.lowercaseString containsString:@"dis"] ||
-                [key.lowercaseString containsString:@"range"]) {
-                id value = dict[key];
-                if ([value isKindOfClass:[NSNumber class]]) {
-                    double distance = [value doubleValue];
-                    if (distance > 0) {
-                        [g_dataLock lock];
-                        g_targetDistance = distance;
-                        [g_dataLock unlock];
-                        NSLog(@"TrackHook: 📏 提取距离: %.2f km", distance);
-                        return;
-                    }
-                } else if ([value isKindOfClass:[NSString class]]) {
-                    NSString *strValue = (NSString *)value;
-                    if ([strValue containsString:@"km"] || [strValue containsString:@"千米"]) {
-                        NSScanner *scanner = [NSScanner scannerWithString:strValue];
-                        double distance = 0.0;
-                        if ([scanner scanDouble:&distance] && distance > 0) {
-                            [g_dataLock lock];
-                            g_targetDistance = distance;
-                            [g_dataLock unlock];
-                            NSLog(@"TrackHook: 📏 从字符串提取距离: %.2f km", distance);
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-        
-        // 递归搜索
-        for (id item in dict.allValues) {
-            [self deepSearchDistanceInObject:item];
-        }
-    } else if ([obj isKindOfClass:[NSArray class]]) {
-        for (id item in (NSArray *)obj) {
-            [self deepSearchDistanceInObject:item];
-        }
-    }
-}
-
-%new
-- (void)extractUserIdFromJSON:(NSDictionary *)json {
-    [self deepSearchUserIdInObject:json];
-}
-
-%new
-- (void)deepSearchUserIdInObject:(id)obj {
-    if (!obj) return;
-    
-    if ([obj isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *dict = (NSDictionary *)obj;
-        
-        // 搜索用户ID字段
-        NSArray *uidKeys = @[@"uid", @"user_id", @"userId", @"union_uid", @"unionUid", @"id", @"userId"];
-        for (NSString *key in uidKeys) {
-            id value = dict[key];
-            if (value) {
-                NSString *uidStr = nil;
-                if ([value isKindOfClass:[NSString class]]) {
-                    uidStr = value;
-                } else if ([value isKindOfClass:[NSNumber class]]) {
-                    uidStr = [value stringValue];
-                }
-                
-                if (uidStr && uidStr.length >= 6) {
-                    NSLog(@"TrackHook: 🔍 在JSON中找到用户ID: %@ = %@", key, uidStr);
-                    [g_dataLock lock];
-                    g_currentTargetUid = [uidStr copy];
-                    [g_dataLock unlock];
-                    return;
-                }
-            }
-        }
-        
-        // 递归搜索
-        for (id item in dict.allValues) {
-            [self deepSearchUserIdInObject:item];
-        }
-    } else if ([obj isKindOfClass:[NSArray class]]) {
-        for (id item in (NSArray *)obj) {
-            [self deepSearchUserIdInObject:item];
-        }
-    }
-}
-
-%end
-
-// Hook NSURLSessionConfiguration以捕获所有请求的默认头部
-%hook NSURLSessionConfiguration
-
-+ (NSURLSessionConfiguration *)defaultSessionConfiguration {
-    NSURLSessionConfiguration *config = %orig;
-    NSLog(@"TrackHook: ⚙️ 获取默认session配置");
-    
-    // 添加自定义的HTTP头（用于调试）
-    NSMutableDictionary *headers = [config.HTTPAdditionalHeaders mutableCopy];
-    if (!headers) headers = [NSMutableDictionary dictionary];
-    
-    NSLog(@"TrackHook: 🔧 当前默认请求头: %@", headers);
-    
-    return config;
-}
-
-%end
-
-// ==================== UI部分保持不变 ====================
 %hook UIViewController
+
+%new
+- (UIWindow *)th_getSafeKeyWindow {
+    UIWindow *foundWindow = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                for (UIWindow *window in windowScene.windows) {
+                    if (window.isKeyWindow) {
+                        foundWindow = window;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return foundWindow ?: [UIApplication sharedApplication].keyWindow;
+}
 
 %new
 - (void)th_onBtnClick {
@@ -335,13 +143,12 @@ static UIWindow *g_floatWindow = nil;
 - (NSString *)extractUserIdFromUI {
     NSLog(@"TrackHook: 🔍 开始提取用户ID");
     
-    // 从分享界面提取用户ID
     NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
     
     for (UIWindow *window in windows) {
         if (window.hidden || window.alpha <= 0) continue;
         
-        __block NSString *foundUid = nil;
+        NSString * __strong foundUid = nil;
         [self searchViewHierarchy:window result:&foundUid];
         if (foundUid) {
             NSLog(@"TrackHook: ✅ 找到用户ID: %@", foundUid);
@@ -354,14 +161,13 @@ static UIWindow *g_floatWindow = nil;
 }
 
 %new
-- (void)searchViewHierarchy:(UIView *)view result:(NSString **)result {
+- (void)searchViewHierarchy:(UIView *)view result:(NSString * __strong * __strong)result {
     if (!view || *result) return;
     
     if ([view isKindOfClass:[UILabel class]]) {
         UILabel *label = (UILabel *)view;
         NSString *text = label.text;
         if (text && text.length > 0) {
-            // 检查常见的ID格式
             NSArray *patterns = @[
                 @"ID\\s*[:：]\\s*(\\d+)",
                 @"用户ID\\s*[:：]\\s*(\\d+)",
@@ -394,25 +200,6 @@ static UIWindow *g_floatWindow = nil;
         [self searchViewHierarchy:subview result:result];
         if (*result) break;
     }
-}
-
-%new
-- (UIWindow *)th_getSafeKeyWindow {
-    UIWindow *foundWindow = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        foundWindow = window;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    return foundWindow ?: [UIApplication sharedApplication].keyWindow;
 }
 
 %new
@@ -546,13 +333,209 @@ static UIWindow *g_floatWindow = nil;
 }
 %end
 
+%hook NSMutableURLRequest
+
+- (void)setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
+    NSLog(@"TrackHook: 🏷️ 设置HTTP头字段: %@ = %@", field, value);
+    
+    if ([field isEqualToString:@"Authorization"] && [value hasPrefix:@"Basic "]) {
+        NSString *token = [value substringFromIndex:6];
+        [g_dataLock lock];
+        g_bluedBasicToken = [token copy];
+        [g_dataLock unlock];
+        NSLog(@"TrackHook: ✅ 捕获到Basic Token (长度: %lu)", (unsigned long)token.length);
+    }
+    
+    %orig(value, field);
+}
+
+%end
+
+%hook NSURLConnection
+
++ (NSData *)sendSynchronousRequest:(NSURLRequest *)request returningResponse:(NSURLResponse * _Nullable *)response error:(NSError * _Nullable *)error {
+    NSLog(@"TrackHook: 🔄 同步请求: %@", request.URL.absoluteString);
+    
+    NSString *auth = request.allHTTPHeaderFields[@"Authorization"];
+    if (auth && [auth hasPrefix:@"Basic "]) {
+        NSString *token = [auth substringFromIndex:6];
+        [g_dataLock lock];
+        g_bluedBasicToken = [token copy];
+        [g_dataLock unlock];
+        NSLog(@"TrackHook: ✅ 从同步请求捕获Token: %@...", [token substringToIndex:MIN(20, token.length)]);
+    }
+    
+    return %orig(request, response, error);
+}
+
+%end
+
+%hook NSURLSession
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *res, NSError *err))completionHandler {
+    
+    NSLog(@"TrackHook: 📡 捕获NSURLSession请求: %@", request.URL.absoluteString);
+    
+    NSDictionary *headers = request.allHTTPHeaderFields;
+    NSLog(@"TrackHook: 📋 请求头: %@", headers);
+    
+    NSString *auth = headers[@"Authorization"];
+    if (auth && [auth hasPrefix:@"Basic "]) {
+        NSString *token = [auth substringFromIndex:6];
+        [g_dataLock lock];
+        g_bluedBasicToken = [token copy];
+        [g_dataLock unlock];
+        NSLog(@"TrackHook: ✅ 从NSURLSession捕获Token (长度: %lu)", (unsigned long)token.length);
+    }
+    
+    NSString *urlString = request.URL.absoluteString;
+    NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
+    for (NSURLQueryItem *item in components.queryItems) {
+        if ([item.name isEqualToString:@"lat"] || [item.name isEqualToString:@"latitude"]) {
+            double lat = [item.value doubleValue];
+            if (fabs(lat) > 0.001) {
+                [g_dataLock lock];
+                g_currentLat = lat;
+                [g_dataLock unlock];
+                NSLog(@"TrackHook: 📍 提取纬度: %.6f", lat);
+            }
+        } else if ([item.name isEqualToString:@"lot"] || [item.name isEqualToString:@"lon"] || 
+                  [item.name isEqualToString:@"longitude"]) {
+            double lng = [item.value doubleValue];
+            if (fabs(lng) > 0.001) {
+                [g_dataLock lock];
+                g_currentLng = lng;
+                [g_dataLock unlock];
+                NSLog(@"TrackHook: 📍 提取经度: %.6f", lng);
+            }
+        }
+    }
+    
+    void (^customCompletionHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (completionHandler) {
+            completionHandler(data, response, error);
+        }
+        
+        if (data && data.length > 0) {
+            @try {
+                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if (json) {
+                    [self extractDistanceFromJSON:json];
+                    [self extractUserIdFromJSON:json];
+                }
+            } @catch (NSException *exception) {
+                NSLog(@"TrackHook: ❌ JSON解析异常: %@", exception);
+            }
+        }
+    };
+    
+    return %orig(request, customCompletionHandler);
+}
+
+%new
+- (void)extractDistanceFromJSON:(NSDictionary *)json {
+    [self deepSearchDistanceInObject:json];
+}
+
+%new
+- (void)extractUserIdFromJSON:(NSDictionary *)json {
+    [self deepSearchUserIdInObject:json];
+}
+
+%new
+- (void)deepSearchDistanceInObject:(id)obj {
+    if (!obj) return;
+    
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)obj;
+        
+        for (NSString *key in dict.allKeys) {
+            if ([key.lowercaseString containsString:@"distance"] || 
+                [key.lowercaseString containsString:@"dis"] ||
+                [key.lowercaseString containsString:@"range"]) {
+                id value = dict[key];
+                if ([value isKindOfClass:[NSNumber class]]) {
+                    double distance = [value doubleValue];
+                    if (distance > 0) {
+                        [g_dataLock lock];
+                        g_targetDistance = distance;
+                        [g_dataLock unlock];
+                        NSLog(@"TrackHook: 📏 提取距离: %.2f km", distance);
+                        return;
+                    }
+                } else if ([value isKindOfClass:[NSString class]]) {
+                    NSString *strValue = (NSString *)value;
+                    if ([strValue containsString:@"km"] || [strValue containsString:@"千米"]) {
+                        NSScanner *scanner = [NSScanner scannerWithString:strValue];
+                        double distance = 0.0;
+                        if ([scanner scanDouble:&distance] && distance > 0) {
+                            [g_dataLock lock];
+                            g_targetDistance = distance;
+                            [g_dataLock unlock];
+                            NSLog(@"TrackHook: 📏 从字符串提取距离: %.2f km", distance);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        
+        for (id item in dict.allValues) {
+            [self deepSearchDistanceInObject:item];
+        }
+    } else if ([obj isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)obj) {
+            [self deepSearchDistanceInObject:item];
+        }
+    }
+}
+
+%new
+- (void)deepSearchUserIdInObject:(id)obj {
+    if (!obj) return;
+    
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)obj;
+        
+        NSArray *uidKeys = @[@"uid", @"user_id", @"userId", @"union_uid", @"unionUid", @"id", @"userId"];
+        for (NSString *key in uidKeys) {
+            id value = dict[key];
+            if (value) {
+                NSString *uidStr = nil;
+                if ([value isKindOfClass:[NSString class]]) {
+                    uidStr = value;
+                } else if ([value isKindOfClass:[NSNumber class]]) {
+                    uidStr = [value stringValue];
+                }
+                
+                if (uidStr && uidStr.length >= 6) {
+                    NSLog(@"TrackHook: 🔍 在JSON中找到用户ID: %@ = %@", key, uidStr);
+                    [g_dataLock lock];
+                    g_currentTargetUid = [uidStr copy];
+                    [g_dataLock unlock];
+                    return;
+                }
+            }
+        }
+        
+        for (id item in dict.allValues) {
+            [self deepSearchUserIdInObject:item];
+        }
+    } else if ([obj isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)obj) {
+            [self deepSearchUserIdInObject:item];
+        }
+    }
+}
+
+%end
+
 %ctor {
-    NSLog(@"TrackHook: 🚀 插件已加载 (修复版本)");
+    NSLog(@"TrackHook: 🚀 插件已加载 (基于iOS逆向工程最佳实践)");
     NSLog(@"TrackHook: 🔧 支持的网络Hook:");
     NSLog(@"TrackHook:   - NSMutableURLRequest (setValue:forHTTPHeaderField:)");
     NSLog(@"TrackHook:   - NSURLConnection (同步请求)");
     NSLog(@"TrackHook:   - NSURLSession (异步请求)");
-    NSLog(@"TrackHook:   - NSURLSessionConfiguration (默认配置)");
     
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
