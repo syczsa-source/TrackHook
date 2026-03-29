@@ -1,7 +1,7 @@
 # 架构支持
 ARCHS = arm64
 
-# 目标配置 - 根据【链接内容】，明确指定部署版本
+# 目标配置
 TARGET = iphone:clang:latest:13.0
 
 # 指定注入的应用
