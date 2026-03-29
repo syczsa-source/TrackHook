@@ -28,6 +28,33 @@ static UIWindow *g_floatWindow = nil;
 @end
 // ==================== 自定义窗口类结束 ====================
 
+// ==================== 类别方法声明 ====================
+// 在hook之前声明所有类别方法，解决编译器找不到方法的问题
+@interface UIViewController (TrackHookMethods)
+- (UIWindow *)th_getSafeKeyWindow;
+- (void)th_onBtnClick;
+- (NSString *)extractUserIdFromUI;
+- (NSString *)searchViewHierarchy:(UIView *)view;
+- (void)th_addBtn;
+- (void)th_handlePan:(UIPanGestureRecognizer *)pan;
+- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
+@end
+
+@interface NSURLConnection (TrackHookMethods)
++ (void)processRequestData:(NSURLRequest *)request;
++ (BOOL)isTargetRequest:(NSString *)urlString host:(NSString *)host;
++ (void)extractDataFromURL:(NSString *)urlString;
+@end
+
+@interface NSURLSession (TrackHookMethods)
+- (void)processRequestData:(NSURLRequest *)request;
+- (void)extractDistanceFromJSON:(NSDictionary *)json;
+- (void)extractUserIdFromJSON:(NSDictionary *)json;
+- (void)deepSearchDistanceInObject:(id)obj;
+- (void)deepSearchUserIdInObject:(id)obj;
+@end
+// ==================== 类别声明结束 ====================
+
 %hook UIViewController
 
 %new
@@ -196,13 +223,20 @@ static UIWindow *g_floatWindow = nil;
             }
         }
         
-        if (!targetScene) {
+        if (!targetScene && @available(iOS 13.0, *)) {
             NSLog(@"TrackHook: ❌ 无法获取当前活跃的 WindowScene");
             return;
         }
         
-        if (!g_floatWindow || (g_floatWindow.windowScene != targetScene && @available(iOS 13.0, *))) {
-            CGRect screenBounds = targetScene.coordinateSpace.bounds;
+        BOOL needCreateWindow = NO;
+        if (@available(iOS 13.0, *)) {
+            needCreateWindow = (!g_floatWindow || g_floatWindow.windowScene != targetScene);
+        } else {
+            needCreateWindow = (!g_floatWindow);
+        }
+        
+        if (needCreateWindow) {
+            CGRect screenBounds = [UIScreen mainScreen].bounds;
             g_floatWindow = [[TrackHookWindow alloc] initWithFrame:screenBounds];
             if (@available(iOS 13.0, *)) {
                 g_floatWindow.windowScene = targetScene;
