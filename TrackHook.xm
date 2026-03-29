@@ -3,7 +3,6 @@
 #import <os/lock.h>
 
 // ===================== 全局变量声明 =====================
-// 使用 os_unfair_lock 替代信号量，更轻量级
 static os_unfair_lock g_dataLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableDictionary *g_userInfoDict = nil;
 static NSString *g_currentTargetUid = nil;
@@ -13,36 +12,52 @@ static double g_myLng = 0.0;
 static UIButton *g_floatBtn = nil;
 static BOOL g_initialized = NO;
 
-// ===================== 工具函数 =====================
-static inline void safe_set_string(NSString * _Nullable * _Nonnull target, NSString * _Nullable value) {
+// ===================== 线程安全的全局变量访问工具 =====================
+// 修复：使用独立的获取和设置函数，避免直接传递全局变量地址
+static inline void safe_set_blued_token(NSString *value) {
     os_unfair_lock_lock(&g_dataLock);
-    *target = [value copy];
+    g_bluedBasicToken = [value copy];
     os_unfair_lock_unlock(&g_dataLock);
 }
 
-static inline NSString *safe_get_string(NSString * _Nullable * _Nonnull source) {
+static inline NSString *safe_get_blued_token(void) {
     os_unfair_lock_lock(&g_dataLock);
-    NSString *result = [*source copy];
+    NSString *result = [g_bluedBasicToken copy];
     os_unfair_lock_unlock(&g_dataLock);
     return result;
 }
 
-static inline void safe_set_double(double *target, double value) {
+static inline void safe_set_my_lat(double value) {
     os_unfair_lock_lock(&g_dataLock);
-    *target = value;
+    g_myLat = value;
     os_unfair_lock_unlock(&g_dataLock);
 }
 
-static inline double safe_get_double(double *source) {
+static inline double safe_get_my_lat(void) {
     os_unfair_lock_lock(&g_dataLock);
-    double result = *source;
+    double result = g_myLat;
+    os_unfair_lock_unlock(&g_dataLock);
+    return result;
+}
+
+static inline void safe_set_my_lng(double value) {
+    os_unfair_lock_lock(&g_dataLock);
+    g_myLng = value;
+    os_unfair_lock_unlock(&g_dataLock);
+}
+
+static inline double safe_get_my_lng(void) {
+    os_unfair_lock_lock(&g_dataLock);
+    double result = g_myLng;
     os_unfair_lock_unlock(&g_dataLock);
     return result;
 }
 
 // ===================== 类别方法声明 =====================
+// 修复：添加缺少的方法声明
 @interface UIViewController (TrackHookMethods)
 - (void)addFloatButton;
+- (void)actuallyAddFloatButtonToWindow:(UIWindow *)window;
 - (void)th_onPan:(UIPanGestureRecognizer *)pan;
 - (void)th_onBtnClick;
 @end
@@ -51,7 +66,6 @@ static inline double safe_get_double(double *source) {
 
 %hook NSURLSession
 
-// 简化处理逻辑，避免阻塞
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request 
                             completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
     
@@ -80,7 +94,7 @@ static inline double safe_get_double(double *source) {
                 if (authHeader && [authHeader hasPrefix:@"Basic "]) {
                     NSString *token = [authHeader substringFromIndex:6];
                     if (token.length > 0) {
-                        safe_set_string(&g_bluedBasicToken, token);
+                        safe_set_blued_token(token);
                         NSLog(@"TrackHook: ✅ 成功抓取Blued Basic Token");
                     }
                 }
@@ -95,7 +109,7 @@ static inline double safe_get_double(double *source) {
                     if (components.count > 0) {
                         double lat = [components[0] doubleValue];
                         if (fabs(lat) > 0.001) {
-                            safe_set_double(&g_myLat, lat);
+                            safe_set_my_lat(lat);
                         }
                     }
                 }
@@ -106,7 +120,7 @@ static inline double safe_get_double(double *source) {
                     if (components.count > 0) {
                         double lng = [components[0] doubleValue];
                         if (fabs(lng) > 0.001) {
-                            safe_set_double(&g_myLng, lng);
+                            safe_set_my_lng(lng);
                         }
                     }
                 }
@@ -212,9 +226,9 @@ static inline double safe_get_double(double *source) {
 %new
 - (void)th_onBtnClick {
     @try {
-        NSString *token = safe_get_string(&g_bluedBasicToken);
-        double myLat = safe_get_double(&g_myLat);
-        double myLng = safe_get_double(&g_myLng);
+        NSString *token = safe_get_blued_token();
+        double myLat = safe_get_my_lat();
+        double myLng = safe_get_my_lng();
         
         NSString *message = [NSString stringWithFormat:@"我的位置: %.6f, %.6f\nToken: %@", 
                            myLat, myLng, token ? @"已获取" : @"未获取"];
