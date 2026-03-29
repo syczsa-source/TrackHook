@@ -1,308 +1,514 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
-#import <CoreLocation/CoreLocation.h>
 #import <objc/runtime.h>
+#import <substrate.h>
 
-// 添加UIViewController的category声明
-@interface UIViewController (TrackHookMethods)
-- (UIWindow *)th_getSafeKeyWindow;
-- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
-- (void)th_handlePan:(UIPanGestureRecognizer *)pan;
-- (void)th_addBtn;
-- (NSString *)searchViewHierarchy:(UIView *)view;
-- (NSString *)extractUserIdFromUI;
-- (void)th_exportData;
-- (void)th_showRequestsList;
-- (void)th_onAdvancedBtnClick;
-- (void)th_onBtnClick;
-@end
-
-// 全局变量声明
-static NSLock *g_dataLock = nil;
-static NSString *g_bluedBasicToken = nil;
-static NSString *g_currentTargetUid = nil;
+// ==================== 全局变量声明 ====================
+static NSMutableDictionary *g_capturedRequests;
+static NSString *g_bluedBasicToken;
+static NSString *g_currentTargetUid;
 static double g_currentLat = 0.0;
 static double g_currentLng = 0.0;
-static double g_targetDistance = -1.0;
-static UIWindow *g_floatWindow = nil;
-static NSString *g_amapAddress = nil;
-static NSMutableDictionary *g_capturedRequests = nil;
-static NSMutableDictionary *g_userData = nil;
+static double g_targetDistance = 0.0;
+static NSString *g_amapAddress;
+static NSLock *g_dataLock;
+static BOOL g_debugMode = YES;
 
-// 常量定义
-#define TRACK_BTN_TAG 100001
-#define BLUED_BUNDLE_ID @"com.bluecity.blued"
-
-// 自定义窗口类
-@interface TrackHookWindow : UIWindow
-@end
-
-@implementation TrackHookWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hitView = [super hitTest:point withEvent:event];
-    UIView *btnView = [self viewWithTag:TRACK_BTN_TAG];
-    if (btnView && [btnView pointInside:[self convertPoint:point toView:btnView] withEvent:event]) {
-        return hitView;
-    }
-    return nil;
+// ==================== 工具函数 ====================
+%new
+static NSString *decodeURLString(NSString *encodedString) {
+    if (!encodedString) return nil;
+    return [encodedString stringByRemovingPercentEncoding];
 }
-@end
 
-// UIViewController Hook
+%new
+static NSDictionary *parseQueryString(NSString *query) {
+    if (!query) return @{};
+    
+    NSMutableDictionary *params = [NSMutableDictionary dictionary];
+    NSArray *components = [query componentsSeparatedByString:@"&"];
+    
+    for (NSString *component in components) {
+        NSArray *keyValue = [component componentsSeparatedByString:@"="];
+        if (keyValue.count == 2) {
+            NSString *key = decodeURLString(keyValue[0]);
+            NSString *value = decodeURLString(keyValue[1]);
+            if (key && value) {
+                params[key] = value;
+            }
+        }
+    }
+    
+    return [params copy];
+}
+
+// ==================== 初始化函数 ====================
+%ctor {
+    NSLog(@"TrackHook: 🚀 Tweak已加载");
+    
+    g_capturedRequests = [NSMutableDictionary dictionary];
+    g_dataLock = [[NSLock alloc] init];
+    g_debugMode = YES;
+    
+    // 注册应用启动通知
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *note) {
+        NSLog(@"TrackHook: 📱 应用已启动");
+    }];
+}
+
+// ==================== NSURLSession Hook ====================
+%hook NSURLSession
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))completionHandler {
+    NSString *urlString = request.URL.absoluteString;
+    
+    // 1. 记录所有请求的基本信息
+    if (g_debugMode) {
+        NSLog(@"TrackHook: 🌐 网络请求 URL: %@", urlString);
+        NSLog(@"TrackHook: 🌐 请求方法: %@", request.HTTPMethod ?: @"GET");
+    }
+    
+    // 2. 记录请求头（查找Authorization）
+    NSDictionary *headers = request.allHTTPHeaderFields;
+    if (headers.count > 0 && g_debugMode) {
+        NSLog(@"TrackHook: 📋 请求头总数: %lu", (unsigned long)headers.count);
+        for (NSString *key in headers) {
+            NSString *value = headers[key];
+            if ([key isEqualToString:@"Authorization"]) {
+                if ([value hasPrefix:@"Basic "]) {
+                    NSString *token = [value substringFromIndex:6];
+                    NSLog(@"TrackHook: 🔐 Basic Token 前50字符: %@...", [token substringToIndex:MIN(50, token.length)]);
+                    
+                    [g_dataLock lock];
+                    g_bluedBasicToken = [value copy];
+                    [g_dataLock unlock];
+                } else if ([value hasPrefix:@"Bearer "]) {
+                    NSLog(@"TrackHook: 🔐 Bearer Token 存在");
+                }
+            }
+        }
+    }
+    
+    // 3. 检查是否是目标接口（根据用户提供的curl命令分析）
+    // 用户提供的curl命令显示有两个关键接口：
+    // 1) /users?latitude=...&longitude=... (获取用户列表)
+    // 2) /users/map/pass/by/status?from=1&uid=... (地图状态)
+    
+    BOOL isTargetRequest = NO;
+    NSString *requestType = @"unknown";
+    
+    // 检查是否是用户列表接口（包含坐标）
+    if ([urlString containsString:@"/users?"] && 
+        ([urlString containsString:@"latitude="] || [urlString containsString:@"longitude="])) {
+        isTargetRequest = YES;
+        requestType = @"users_list";
+        NSLog(@"TrackHook: 🎯🎯🎯 捕获到用户列表接口（含坐标）");
+    }
+    
+    // 检查是否是地图状态接口
+    if ([urlString containsString:@"/users/map/pass/by/status"]) {
+        isTargetRequest = YES;
+        requestType = @"map_status";
+        NSLog(@"TrackHook: 🎯 捕获到地图状态接口");
+    }
+    
+    // 检查是否是用户筛选接口（旧版本）
+    if ([urlString containsString:@"/users/selection"]) {
+        isTargetRequest = YES;
+        requestType = @"selection";
+        NSLog(@"TrackHook: 🎯 捕获到用户筛选接口");
+    }
+    
+    // 4. 如果是目标请求，解析参数
+    if (isTargetRequest) {
+        NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
+        NSString *query = components.query;
+        
+        if (query && query.length > 0) {
+            NSDictionary *params = parseQueryString(query);
+            
+            if (g_debugMode) {
+                NSLog(@"TrackHook: 🔍 完整查询参数: %@", query);
+                NSLog(@"TrackHook: 📊 解析后的参数数量: %lu", (unsigned long)params.count);
+            }
+            
+            // 解析坐标参数
+            NSString *latStr = params[@"latitude"];
+            NSString *lngStr = params[@"latitude"];
+            
+            if (latStr) {
+                double lat = [latStr doubleValue];
+                if (fabs(lat) > 0.0001) {
+                    [g_dataLock lock];
+                    g_currentLat = lat;
+                    [g_dataLock unlock];
+                    NSLog(@"TrackHook: ✅✅✅ 成功捕获纬度: %.6f", lat);
+                } else {
+                    NSLog(@"TrackHook: ⚠️ 纬度值无效: %@", latStr);
+                }
+            }
+            
+            if (lngStr) {
+                double lng = [lngStr doubleValue];
+                if (fabs(lng) > 0.0001) {
+                    [g_dataLock lock];
+                    g_currentLng = lng;
+                    [g_dataLock unlock];
+                    NSLog(@"TrackHook: ✅✅✅ 成功捕获经度: %.6f", lng);
+                } else {
+                    NSLog(@"TrackHook: ⚠️ 经度值无效: %@", lngStr);
+                }
+            }
+            
+            // 解析其他重要参数
+            NSString *uid = params[@"uid"];
+            if (uid && uid.length > 0) {
+                [g_dataLock lock];
+                g_currentTargetUid = [uid copy];
+                [g_dataLock unlock];
+                NSLog(@"TrackHook: 👤 捕获用户ID: %@", uid);
+            }
+            
+            NSString *distanceStr = params[@"distance"] ?: params[@"range"];
+            if (distanceStr) {
+                double distance = [distanceStr doubleValue];
+                [g_dataLock lock];
+                g_targetDistance = distance;
+                [g_dataLock unlock];
+                NSLog(@"TrackHook: 📏 捕获距离参数: %.2f", distance);
+            }
+            
+            // 解析filters参数（JSON格式）
+            NSString *filtersStr = params[@"filters"];
+            if (filtersStr) {
+                NSData *filtersData = [filtersStr dataUsingEncoding:NSUTF8StringEncoding];
+                NSError *error;
+                NSDictionary *filters = [NSJSONSerialization JSONObjectWithData:filtersData options:0 error:&error];
+                if (!error && [filters isKindOfClass:[NSDictionary class]]) {
+                    NSLog(@"TrackHook: 🎛️ 筛选条件: %@", filters);
+                }
+            }
+        }
+        
+        // 5. 记录请求信息
+        NSMutableDictionary *requestInfo = [NSMutableDictionary dictionary];
+        requestInfo[@"url"] = urlString;
+        requestInfo[@"method"] = request.HTTPMethod ?: @"GET";
+        requestInfo[@"timestamp"] = [NSDate date].description;
+        requestInfo[@"type"] = requestType;
+        requestInfo[@"headers"] = headers ?: @{};
+        
+        if (query && query.length > 0) {
+            requestInfo[@"params"] = parseQueryString(query);
+        }
+        
+        [g_dataLock lock];
+        NSString *key = [NSString stringWithFormat:@"%f", [[NSDate date] timeIntervalSince1970]];
+        g_capturedRequests[key] = requestInfo;
+        
+        if (g_debugMode) {
+            NSLog(@"TrackHook: 💾 已保存请求记录，总数: %lu", (unsigned long)g_capturedRequests.count);
+        }
+        [g_dataLock unlock];
+    }
+    
+    // 6. 检查请求体（对于POST请求）
+    if (request.HTTPBody && g_debugMode) {
+        NSString *bodyString = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
+        if (bodyString && bodyString.length > 0) {
+            NSLog(@"TrackHook: 📦 请求体（前200字符）: %@", [bodyString substringToIndex:MIN(200, bodyString.length)]);
+        }
+    }
+    
+    return %orig(request, completionHandler);
+}
+%end
+
+// ==================== NSURLConnection Hook ====================
+%hook NSURLConnection
+
++ (NSData *)sendSynchronousRequest:(NSURLRequest *)request returningResponse:(NSURLResponse **)response error:(NSError **)error {
+    NSString *urlString = request.URL.absoluteString;
+    
+    if (g_debugMode) {
+        NSLog(@"TrackHook: 🔄 NSURLConnection同步请求: %@", urlString);
+    }
+    
+    // 检查是否是目标接口
+    if ([urlString containsString:@"/users"] && 
+        ([urlString containsString:@"latitude="] || [urlString containsString:@"longitude="])) {
+        NSLog(@"TrackHook: 🎯 NSURLConnection捕获目标接口");
+        
+        NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
+        NSString *query = components.query;
+        
+        if (query) {
+            NSDictionary *params = parseQueryString(query);
+            
+            for (NSString *key in params) {
+                if ([key isEqualToString:@"latitude"]) {
+                    double lat = [params[key] doubleValue];
+                    [g_dataLock lock];
+                    g_currentLat = lat;
+                    [g_dataLock unlock];
+                    NSLog(@"TrackHook: ✅ NSURLConnection捕获纬度: %.6f", lat);
+                } else if ([key isEqualToString:@"longitude"]) {
+                    double lng = [params[key] doubleValue];
+                    [g_dataLock lock];
+                    g_currentLng = lng;
+                    [g_dataLock unlock];
+                    NSLog(@"TrackHook: ✅ NSURLConnection捕获经度: %.6f", lng);
+                }
+            }
+        }
+        
+        // 记录请求
+        NSMutableDictionary *requestInfo = [NSMutableDictionary dictionary];
+        requestInfo[@"url"] = urlString;
+        requestInfo[@"timestamp"] = [NSDate date].description;
+        requestInfo[@"type"] = @"sync_connection";
+        
+        if (query) {
+            requestInfo[@"params"] = parseQueryString(query);
+        }
+        
+        [g_dataLock lock];
+        NSString *key = [NSString stringWithFormat:@"sync_%f", [[NSDate date] timeIntervalSince1970]];
+        g_capturedRequests[key] = requestInfo;
+        [g_dataLock unlock];
+    }
+    
+    return %orig(request, response, error);
+}
+
++ (void)sendAsynchronousRequest:(NSURLRequest *)request queue:(NSOperationQueue *)queue completionHandler:(void (^)(NSURLResponse *, NSData *, NSError *))handler {
+    NSString *urlString = request.URL.absoluteString;
+    
+    if (g_debugMode) {
+        NSLog(@"TrackHook: 🔄 NSURLConnection异步请求: %@", urlString);
+    }
+    
+    // 检查是否是目标接口
+    if ([urlString containsString:@"/users"] && 
+        ([urlString containsString:@"latitude="] || [urlString containsString:@"longitude="])) {
+        NSLog(@"TrackHook: 🎯 NSURLConnection异步捕获目标接口");
+        
+        NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
+        NSString *query = components.query;
+        
+        if (query) {
+            NSDictionary *params = parseQueryString(query);
+            
+            for (NSString *key in params) {
+                if ([key isEqualToString:@"latitude"]) {
+                    double lat = [params[key] doubleValue];
+                    [g_dataLock lock];
+                    g_currentLat = lat;
+                    [g_dataLock unlock];
+                    NSLog(@"TrackHook: ✅ NSURLConnection异步捕获纬度: %.6f", lat);
+                } else if ([key isEqualToString:@"longitude"]) {
+                    double lng = [params[key] doubleValue];
+                    [g_dataLock lock];
+                    g_currentLng = lng;
+                    [g_dataLock unlock];
+                    NSLog(@"TrackHook: ✅ NSURLConnection异步捕获经度: %.6f", lng);
+                }
+            }
+        }
+        
+        // 记录请求
+        NSMutableDictionary *requestInfo = [NSMutableDictionary dictionary];
+        requestInfo[@"url"] = urlString;
+        requestInfo[@"timestamp"] = [NSDate date].description;
+        requestInfo[@"type"] = @"async_connection";
+        
+        if (query) {
+            requestInfo[@"params"] = parseQueryString(query);
+        }
+        
+        [g_dataLock lock];
+        NSString *key = [NSString stringWithFormat:@"async_%f", [[NSDate date] timeIntervalSince1970]];
+        g_capturedRequests[key] = requestInfo;
+        [g_dataLock unlock];
+    }
+    
+    return %orig(request, queue, handler);
+}
+%end
+
+// ==================== UI增强部分 ====================
 %hook UIViewController
 
-%new
-- (UIWindow *)th_getSafeKeyWindow {
-    UIWindow *foundWindow = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        foundWindow = window;
-                        break;
-                    }
-                }
-            }
-        }
+// 添加悬浮按钮
+- (void)viewDidLoad {
+    %orig;
+    
+    // 只在主视图控制器添加悬浮按钮
+    if ([self isKindOfClass:NSClassFromString(@"BLHomeViewController")] || 
+        [self isKindOfClass:NSClassFromString(@"BLNearbyViewController")]) {
+        
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self addTrackHookButton];
+        });
     }
-    return foundWindow ?: [[UIApplication sharedApplication] windows].firstObject;
 }
+%end
 
 %new
-- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_floatWindow) {
-            g_floatWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-            g_floatWindow.windowLevel = UIWindowLevelStatusBar + 1;
-            g_floatWindow.backgroundColor = [UIColor clearColor];
-            g_floatWindow.userInteractionEnabled = YES;
-            g_floatWindow.hidden = NO;
-        }
-        for (UIView *subview in g_floatWindow.subviews) {
-            if ([subview isKindOfClass:[UILabel class]] && subview.tag == 9999) {
-                [subview removeFromSuperview];
-            }
-        }
-        UILabel *lab = [[UILabel alloc] init];
-        lab.tag = 9999;
-        lab.text = msg;
-        lab.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-        lab.textAlignment = NSTextAlignmentCenter;
-        lab.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
-        lab.textColor = [UIColor whiteColor];
-        lab.layer.cornerRadius = 10;
-        lab.clipsToBounds = YES;
-        lab.numberOfLines = 0;
-        CGSize textSize = [lab sizeThatFits:CGSizeMake(g_floatWindow.bounds.size.width * 0.7, 100)];
-        lab.bounds = CGRectMake(0, 0, textSize.width + 30, textSize.height + 20);
-        lab.center = CGPointMake(g_floatWindow.bounds.size.width / 2, g_floatWindow.bounds.size.height * 0.85);
-        [g_floatWindow addSubview:lab];
-        lab.alpha = 0;
-        [UIView animateWithDuration:0.3 animations:^{ lab.alpha = 1.0; }];
-        [UIView animateWithDuration:0.3 delay:dur options:0 animations:^{ lab.alpha = 0; } completion:^(BOOL finished) { 
-            if (finished) [lab removeFromSuperview]; 
-        }];
-    });
-}
-
-%new
-- (void)th_handlePan:(UIPanGestureRecognizer *)pan {
-    UIView *v = pan.view;
-    CGPoint translation = [pan translationInView:v.superview];
-    v.center = CGPointMake(v.center.x + translation.x, v.center.y + translation.y);
-    [pan setTranslation:CGPointZero inView:v.superview];
-    CGFloat margin = 28;
-    CGRect safeArea = v.superview.bounds;
-    v.center = CGPointMake(MAX(margin, MIN(safeArea.size.width - margin, v.center.x)),
-                           MAX(margin, MIN(safeArea.size.height - margin, v.center.y)));
-}
-
-%new
-- (void)th_addBtn {
-    NSLog(@"TrackHook: 🎨 准备添加悬浮按钮");
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindowScene *targetScene = nil;
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
-                    targetScene = (UIWindowScene *)scene;
-                    break;
-                }
-            }
-        }
-        
-        if (@available(iOS 13.0, *)) {
-            if (!targetScene) {
-                NSLog(@"TrackHook: ❌ 无法获取当前活跃的 WindowScene");
-                return;
-            }
-        }
-        
-        BOOL needCreateWindow = NO;
-        if (@available(iOS 13.0, *)) {
-            needCreateWindow = (!g_floatWindow || g_floatWindow.windowScene != targetScene);
-        } else {
-            needCreateWindow = (!g_floatWindow);
-        }
-        
-        if (needCreateWindow) {
-            CGRect screenBounds = [UIScreen mainScreen].bounds;
-            g_floatWindow = [[TrackHookWindow alloc] initWithFrame:screenBounds];
-            if (@available(iOS 13.0, *)) {
-                g_floatWindow.windowScene = targetScene;
-            }
-            g_floatWindow.windowLevel = UIWindowLevelStatusBar + 10;
-            g_floatWindow.backgroundColor = [UIColor clearColor];
-            g_floatWindow.rootViewController = [UIViewController new];
-            g_floatWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
-            g_floatWindow.userInteractionEnabled = YES;
-            g_floatWindow.hidden = NO;
-            NSLog(@"TrackHook: 🪟 已创建独立悬浮窗口");
-        }
-        
-        UIButton *oldBtn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
-        if (oldBtn) [oldBtn removeFromSuperview];
-        
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.tag = TRACK_BTN_TAG;
-        btn.frame = CGRectMake(g_floatWindow.bounds.size.width - 70, g_floatWindow.bounds.size.height / 2, 56, 56);
-        btn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.85];
-        [btn setTitle:@"🛰️" forState:UIControlStateNormal];
-        [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:24];
-        btn.layer.cornerRadius = 28;
-        btn.layer.borderWidth = 1.0;
-        btn.layer.borderColor = [UIColor whiteColor].CGColor;
-        btn.layer.shadowColor = [UIColor blackColor].CGColor;
-        btn.layer.shadowOffset = CGSizeMake(0, 2);
-        btn.layer.shadowOpacity = 0.3;
-        btn.userInteractionEnabled = YES;
-        
-        [btn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_handlePan:)];
-        [btn addGestureRecognizer:pan];
-        [g_floatWindow addSubview:btn];
-        NSLog(@"TrackHook: ✅ 悬浮按钮已添加到独立窗口");
-    });
-}
-
-%new
-- (NSString *)searchViewHierarchy:(UIView *)view {
-    if (!view) return nil;
+- (void)addTrackHookButton {
+    UIButton *trackButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    trackButton.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 70, 100, 60, 60);
+    trackButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:0.9];
+    trackButton.layer.cornerRadius = 30;
+    trackButton.layer.shadowColor = [UIColor blackColor].CGColor;
+    trackButton.layer.shadowOffset = CGSizeMake(0, 2);
+    trackButton.layer.shadowOpacity = 0.3;
+    trackButton.layer.shadowRadius = 4;
     
-    if ([view isKindOfClass:[UILabel class]]) {
-        UILabel *label = (UILabel *)view;
-        NSString *text = label.text;
-        if (text && text.length > 0) {
-            NSArray *patterns = @[
-                @"ID\\s*[:：]\\s*(\\d+)",
-                @"用户ID\\s*[:：]\\s*(\\d+)",
-                @"UID\\s*[:：]\\s*(\\d+)",
-                @"\\b(\\d{6,10})\\b"
-            ];
-            
-            for (NSString *pattern in patterns) {
-                NSError *error = nil;
-                NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern 
-                                                                                       options:NSRegularExpressionCaseInsensitive 
-                                                                                         error:&error];
-                if (!error) {
-                    NSTextCheckingResult *match = [regex firstMatchInString:text 
-                                                                    options:0 
-                                                                      range:NSMakeRange(0, text.length)];
-                    if (match) {
-                        NSString *uid = [text substringWithRange:[match rangeAtIndex:1]];
-                        if (uid.length >= 6 && uid.length <= 10) {
-                            return uid;
-                        }
-                    }
-                }
-            }
-        }
+    [trackButton setTitle:@"TH" forState:UIControlStateNormal];
+    [trackButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    trackButton.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    
+    [trackButton addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
+    
+    // 添加长按手势（高级功能）
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(th_onAdvancedBtnClick)];
+    [trackButton addGestureRecognizer:longPress];
+    
+    // 添加拖拽手势
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_onButtonPan:)];
+    [trackButton addGestureRecognizer:pan];
+    
+    // 添加到窗口
+    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    if (window) {
+        [window addSubview:trackButton];
+        [window bringSubviewToFront:trackButton];
     }
-    
-    for (UIView *subview in view.subviews) {
-        NSString *foundUid = [self searchViewHierarchy:subview];
-        if (foundUid) {
-            return foundUid;
-        }
-    }
-    
-    return nil;
 }
 
 %new
-- (NSString *)extractUserIdFromUI {
-    NSLog(@"TrackHook: 🔍 开始从UI提取用户ID");
+- (void)th_onButtonPan:(UIPanGestureRecognizer *)pan {
+    UIButton *button = (UIButton *)pan.view;
+    CGPoint translation = [pan translationInView:button.superview];
     
-    NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
+    CGPoint center = button.center;
+    center.x += translation.x;
+    center.y += translation.y;
     
-    for (UIWindow *window in windows) {
-        if (window.hidden || window.alpha <= 0) continue;
-        
-        NSString *foundUid = [self searchViewHierarchy:window];
-        if (foundUid) {
-            NSLog(@"TrackHook: ✅ 找到用户ID: %@", foundUid);
-            return foundUid;
-        }
-    }
+    // 限制在屏幕范围内
+    CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
+    CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
     
-    NSLog(@"TrackHook: ❌ 未找到用户ID");
-    return nil;
+    center.x = MAX(30, MIN(screenWidth - 30, center.x));
+    center.y = MAX(50, MIN(screenHeight - 50, center.y));
+    
+    button.center = center;
+    [pan setTranslation:CGPointZero inView:button.superview];
 }
 
 %new
-- (void)th_exportData {
-    NSMutableDictionary *exportData = [NSMutableDictionary dictionary];
+- (void)th_onBtnClick {
+    NSLog(@"TrackHook: 🎯 悬浮按钮被点击");
     
     [g_dataLock lock];
-    if (g_currentTargetUid) exportData[@"user_id"] = g_currentTargetUid;
-    if (g_bluedBasicToken) exportData[@"basic_token"] = g_bluedBasicToken;
-    if (fabs(g_currentLat) > 0.001) exportData[@"latitude"] = @(g_currentLat);
-    if (fabs(g_currentLng) > 0.001) exportData[@"longitude"] = @(g_currentLng);
-    if (g_targetDistance > 0) exportData[@"distance"] = @(g_targetDistance);
-    if (g_amapAddress) exportData[@"address"] = g_amapAddress;
     
-    if (g_capturedRequests.count > 0) {
-        exportData[@"captured_requests"] = [g_capturedRequests copy];
+    // 1. 显示当前存储的所有数据
+    NSMutableString *debugInfo = [NSMutableString string];
+    [debugInfo appendString:@"🔧 TrackHook 调试信息\n\n"];
+    
+    [debugInfo appendFormat:@"📱 应用状态:\n"];
+    [debugInfo appendFormat:@"  • 调试模式: %@\n", g_debugMode ? @"✅ 开启" : @"🔇 关闭"];
+    [debugInfo appendFormat:@"  • 捕获请求数: %lu\n\n", (unsigned long)g_capturedRequests.count];
+    
+    [debugInfo appendFormat:@"🔑 认证信息:\n"];
+    [debugInfo appendFormat:@"  • Basic Token: %@\n", g_bluedBasicToken ? @"✅ 已获取" : @"❌ 无"];
+    [debugInfo appendFormat:@"  • 当前用户ID: %@\n\n", g_currentTargetUid ?: @"❌ 无"];
+    
+    [debugInfo appendFormat:@"📍 坐标信息:\n"];
+    if (fabs(g_currentLat) > 0.001 && fabs(g_currentLng) > 0.001) {
+        [debugInfo appendFormat:@"  • 纬度: %.6f\n", g_currentLat];
+        [debugInfo appendFormat:@"  • 经度: %.6f\n", g_currentLng];
+        [debugInfo appendFormat:@"  • 距离: %.2f km\n\n", g_targetDistance];
+    } else {
+        [debugInfo appendString:@"  • ❌ 未捕获到有效坐标\n\n"];
     }
     
-    if (g_userData.count > 0) {
-        exportData[@"user_data"] = [g_userData copy];
+    // 2. 显示最近捕获的请求
+    NSArray *sortedKeys = [[g_capturedRequests allKeys] sortedArrayUsingSelector:@selector(compare:)];
+    NSInteger recentCount = MIN(3, sortedKeys.count);
+    
+    if (recentCount > 0) {
+        [debugInfo appendString:@"📡 最近请求:\n"];
+        
+        for (NSInteger i = MAX(0, (NSInteger)sortedKeys.count - recentCount); i < sortedKeys.count; i++) {
+            NSString *key = sortedKeys[i];
+            NSDictionary *req = g_capturedRequests[key];
+            NSString *url = req[@"url"];
+            NSString *type = req[@"type"] ?: @"unknown";
+            
+            // 简化URL显示
+            NSString *displayUrl = url;
+            if (url.length > 50) {
+                displayUrl = [NSString stringWithFormat:@"%@...%@", 
+                             [url substringToIndex:25], 
+                             [url substringFromIndex:url.length - 25]];
+            }
+            
+            [debugInfo appendFormat:@"  [%ld] %@\n", (long)i+1, type];
+            
+            // 检查是否有坐标参数
+            NSDictionary *params = req[@"params"];
+            if (params) {
+                if (params[@"latitude"]) {
+                    [debugInfo appendFormat:@"    📌 lat: %@\n", params[@"latitude"]];
+                }
+                if (params[@"longitude"]) {
+                    [debugInfo appendFormat:@"    📌 lng: %@\n", params[@"longitude"]];
+                }
+                if (params[@"uid"]) {
+                    [debugInfo appendFormat:@"    👤 uid: %@\n", params[@"uid"]];
+                }
+            }
+        }
+    } else {
+        [debugInfo appendString:@"📡 最近请求: 无\n"];
     }
+    
     [g_dataLock unlock];
     
-    NSError *error = nil;
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:exportData options:NSJSONWritingPrettyPrinted error:&error];
-    
-    if (error) {
-        [self th_showToast:@"导出失败" duration:2.0];
-        return;
-    }
-    
-    NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    [[UIPasteboard generalPasteboard] setString:jsonStr];
-    [self th_showToast:@"数据已复制到剪贴板" duration:2.0];
-}
-
-%new
-- (void)th_showRequestsList {
-    NSMutableString *result = [NSMutableString string];
-    [result appendString:@"📡 捕获的网络请求:\n\n"];
-    
-    NSArray *sortedKeys = [[g_capturedRequests allKeys] sortedArrayUsingSelector:@selector(compare:)];
-    for (NSString *key in sortedKeys) {
-        NSDictionary *requestInfo = g_capturedRequests[key];
-        [result appendFormat:@"📍 %@\n", requestInfo[@"url"]];
-        [result appendFormat:@"   ⏰ %@\n", requestInfo[@"timestamp"]];
-        [result appendFormat:@"   📁 参数: %@\n\n", requestInfo[@"params"]];
-    }
-    
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"请求列表" 
-                                                                   message:result.length > 0 ? result : @"暂无捕获的请求" 
+    // 3. 显示调试信息弹窗
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"TrackHook" 
+                                                                   message:debugInfo 
                                                             preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"复制Token" 
+                                              style:UIAlertActionStyleDefault 
+                                            handler:^(UIAlertAction *a){
+        if (g_bluedBasicToken) {
+            [[UIPasteboard generalPasteboard] setString:g_bluedBasicToken];
+            [self th_showToast:@"Token已复制到剪贴板" duration:2.0];
+        } else {
+            [self th_showToast:@"无Token可复制" duration:2.0];
+        }
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"查看所有请求" 
+                                              style:UIAlertActionStyleDefault 
+                                            handler:^(UIAlertAction *a){
+        [self th_showAllRequests];
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"切换调试模式" 
+                                              style:UIAlertActionStyleDefault 
+                                            handler:^(UIAlertAction *a){
+        g_debugMode = !g_debugMode;
+        NSString *msg = g_debugMode ? @"✅ 调试模式已开启" : @"🔇 调试模式已关闭";
+        [self th_showToast:msg duration:2.0];
+    }]];
     
     [alert addAction:[UIAlertAction actionWithTitle:@"关闭" 
                                               style:UIAlertActionStyleCancel 
@@ -317,32 +523,28 @@ static NSMutableDictionary *g_userData = nil;
                                                                    message:@"选择要执行的操作" 
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     
-    [alert addAction:[UIAlertAction actionWithTitle:@"查看请求列表" 
+    [alert addAction:[UIAlertAction actionWithTitle:@"导出所有数据" 
                                               style:UIAlertActionStyleDefault 
                                             handler:^(UIAlertAction *a){
-        [self th_showRequestsList];
+        [self th_exportAllData];
     }]];
     
     [alert addAction:[UIAlertAction actionWithTitle:@"清除所有数据" 
                                               style:UIAlertActionStyleDestructive 
                                             handler:^(UIAlertAction *a){
-        [g_dataLock lock];
-        g_bluedBasicToken = nil;
-        g_currentTargetUid = nil;
-        g_currentLat = 0.0;
-        g_currentLng = 0.0;
-        g_targetDistance = -1.0;
-        g_amapAddress = nil;
-        [g_capturedRequests removeAllObjects];
-        [g_userData removeAllObjects];
-        [g_dataLock unlock];
-        [self th_showToast:@"已清除所有数据" duration:2.0];
+        [self th_clearAllData];
     }]];
     
-    [alert addAction:[UIAlertAction actionWithTitle:@"导出数据" 
+    [alert addAction:[UIAlertAction actionWithTitle:@"模拟坐标请求" 
                                               style:UIAlertActionStyleDefault 
                                             handler:^(UIAlertAction *a){
-        [self th_exportData];
+        [self th_testCoordinateRequest];
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"查看系统日志" 
+                                              style:UIAlertActionStyleDefault 
+                                            handler:^(UIAlertAction *a){
+        [self th_showSystemLog];
     }]];
     
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" 
@@ -353,233 +555,254 @@ static NSMutableDictionary *g_userData = nil;
 }
 
 %new
-- (void)th_onBtnClick {
-    NSLog(@"TrackHook: 🎯 悬浮按钮被点击 - 基础功能");
-    
+- (void)th_showAllRequests {
     [g_dataLock lock];
-    NSString *currentToken = [g_bluedBasicToken copy];
-    NSString *currentUid = [g_currentTargetUid copy];
-    double lat = g_currentLat;
-    double lng = g_currentLng;
-    double distance = g_targetDistance;
-    NSString *amapAddr = [g_amapAddress copy];
-    [g_dataLock unlock];
     
-    NSLog(@"TrackHook: 📊 当前数据状态:");
-    NSLog(@"TrackHook:   Token: %@", currentToken ? @"✅ 已获取" : @"❌ 无");
-    NSLog(@"TrackHook:   用户ID: %@", currentUid ?: @"❌ 无");
-    NSLog(@"TrackHook:   我的坐标: (%.6f, %.6f)", lat, lng);
-    NSLog(@"TrackHook:   距离: %.2f km", distance);
-    NSLog(@"TrackHook:   高德地址: %@", amapAddr ?: @"❌ 无");
+    NSMutableString *requestsInfo = [NSMutableString string];
+    [requestsInfo appendString:@"📋 所有捕获的请求\n\n"];
     
-    NSString *uid = [self extractUserIdFromUI];
-    if (uid && uid.length > 0) {
-        NSLog(@"TrackHook: ✅ 从UI提取到用户ID: %@", uid);
-        [g_dataLock lock];
-        g_currentTargetUid = [uid copy];
-        [g_dataLock unlock];
-    }
+    NSArray *sortedKeys = [[g_capturedRequests allKeys] sortedArrayUsingSelector:@selector(compare:)];
     
-    [g_dataLock lock];
-    NSString *targetUid = [g_currentTargetUid copy];
-    NSString *basicToken = [g_bluedBasicToken copy];
-    double myLat = g_currentLat;
-    double myLng = g_currentLng;
-    double myDistance = g_targetDistance;
-    NSString *myAmapAddr = [g_amapAddress copy];
-    [g_dataLock unlock];
-    
-    if (!targetUid) {
-        [self th_showToast:@"缺少用户ID\n请点击右上角分享按钮" duration:3.0];
-        return;
-    }
-    if (!basicToken) {
-        [self th_showToast:@"缺少Token\n请刷新动态后重试" duration:3.0];
-        return;
-    }
-    if (fabs(myLat) < 0.001 || fabs(myLng) < 0.001) {
-        [self th_showToast:@"缺少我的坐标\n请先刷新用户动态" duration:3.0];
-        return;
-    }
-
-    NSString *resStr = [NSString stringWithFormat:@"🆔 用户ID: %@\n\n📍 我的位置:\n纬度: %.6f\n经度: %.6f\n\n📏 距离: %.2f km\n\n🗺️ 高德地址: %@\n\n🔐 Basic Token:\n%@", 
-                       targetUid, myLat, myLng, myDistance, 
-                       myAmapAddr ?: @"无", 
-                       [basicToken substringToIndex:MIN(50, basicToken.length)]];
-    
-    UIAlertController *resAlert = [UIAlertController alertControllerWithTitle:@"定位信息" 
-                                                                     message:resStr 
-                                                              preferredStyle:UIAlertControllerStyleAlert];
-    
-    [resAlert addAction:[UIAlertAction actionWithTitle:@"复制坐标" 
-                                                 style:UIAlertActionStyleDefault 
-                                               handler:^(UIAlertAction *a){
-        NSString *coords = [NSString stringWithFormat:@"%.6f, %.6f", myLat, myLng];
-        [[UIPasteboard generalPasteboard] setString:coords];
-        [self th_showToast:@"坐标已复制" duration:1.0];
-    }]];
-    
-    [resAlert addAction:[UIAlertAction actionWithTitle:@"复制Token" 
-                                                 style:UIAlertActionStyleDefault 
-                                               handler:^(UIAlertAction *a){
-        if (basicToken) {
-            [[UIPasteboard generalPasteboard] setString:basicToken];
-            [self th_showToast:@"Token已复制" duration:1.0];
-        } else {
-            [self th_showToast:@"无Token信息" duration:1.0];
-        }
-    }]];
-    
-    [resAlert addAction:[UIAlertAction actionWithTitle:@"高级功能" 
-                                                 style:UIAlertActionStyleDefault 
-                                               handler:^(UIAlertAction *a){
-        [self th_onAdvancedBtnClick];
-    }]];
-    
-    [resAlert addAction:[UIAlertAction actionWithTitle:@"确定" 
-                                                 style:UIAlertActionStyleCancel 
-                                               handler:nil]];
-    [self presentViewController:resAlert animated:YES completion:nil];
-}
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig(animated);
-    NSString *clsName = NSStringFromClass([self class]);
-    NSArray *targetKeywords = @[@"Detail", @"User", @"Profile", @"Homepage", @"Info", @"HomePage", @"PersonData", @"HomeView", @"Selection", @"List", @"Explore"];
-    BOOL shouldInject = NO;
-    for (NSString *keyword in targetKeywords) {
-        if ([clsName containsString:keyword]) {
-            shouldInject = YES;
-            break;
-        }
-    }
-    if (shouldInject) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self th_addBtn];
-        });
+    if (sortedKeys.count == 0) {
+        [requestsInfo appendString:@"❌ 无捕获的请求\n"];
     } else {
-        if (g_floatWindow) {
-            UIView *btn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
-            if (btn) {
-                [btn removeFromSuperview];
-                NSLog(@"TrackHook: 📍 在非目标页面移除按钮");
+        for (NSString *key in sortedKeys) {
+            NSDictionary *req = g_capturedRequests[key];
+            NSString *timestamp = req[@"timestamp"];
+            NSString *type = req[@"type"] ?: @"unknown";
+            NSString *url = req[@"url"];
+            
+            [requestsInfo appendFormat:@"[%@] %@\n", timestamp, type];
+            [requestsInfo appendFormat:@"URL: %@\n", url];
+            
+            NSDictionary *params = req[@"params"];
+            if (params && params.count > 0) {
+                [requestsInfo appendString:@"参数:\n"];
+                for (NSString *paramKey in params) {
+                    NSString *value = params[paramKey];
+                    if (value.length > 50) {
+                        value = [NSString stringWithFormat:@"%@...", [value substringToIndex:50]];
+                    }
+                    [requestsInfo appendFormat:@"  %@: %@\n", paramKey, value];
+                }
             }
-        }
-    }
-}
-%end
-
-%hook NSMutableURLRequest
-
-- (void)setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
-    NSLog(@"TrackHook: 🏷️ 设置HTTP头字段: %@ = %@...", field, 
-          [value substringToIndex:MIN(30, value.length)]);
-    
-    if ([field isEqualToString:@"Authorization"] && [value hasPrefix:@"Basic "]) {
-        NSString *token = [value substringFromIndex:6];
-        if (token.length > 0) {
-            [g_dataLock lock];
-            g_bluedBasicToken = [token copy];
-            [g_dataLock unlock];
-            NSLog(@"TrackHook: ✅ 捕获到Basic Token (长度: %lu)", (unsigned long)token.length);
+            
+            [requestsInfo appendString:@"\n"];
         }
     }
     
-    %orig(value, field);
-}
-%end
-
-%hook NSURLConnection
-
-+ (NSData *)sendSynchronousRequest:(NSURLRequest *)request returningResponse:(NSURLResponse **)response error:(NSError **)error {
-    NSLog(@"TrackHook: 🔗 NSURLConnection同步请求: %@", request.URL.absoluteString);
+    [g_dataLock unlock];
     
-    if ([request.URL.absoluteString containsString:@"users/selection"]) {
-        NSLog(@"TrackHook: 🎯 捕获到用户筛选接口: %@", request.URL.absoluteString);
+    // 显示滚动视图
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"所有请求" 
+                                                                   message:requestsInfo 
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"关闭" 
+                                              style:UIAlertActionStyleCancel 
+                                            handler:nil]];
+    
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+%new
+- (void)th_exportAllData {
+    [g_dataLock lock];
+    
+    NSMutableDictionary *exportData = [NSMutableDictionary dictionary];
+    
+    // 收集所有数据
+    if (g_bluedBasicToken) {
+        exportData[@"basic_token"] = g_bluedBasicToken;
+    }
+    
+    if (g_currentTargetUid) {
+        exportData[@"current_uid"] = g_currentTargetUid;
+    }
+    
+    if (fabs(g_currentLat) > 0.001) {
+        exportData[@"latitude"] = @(g_currentLat);
+    }
+    
+    if (fabs(g_currentLng) > 0.001) {
+        exportData[@"longitude"] = @(g_currentLng);
+    }
+    
+    if (fabs(g_targetDistance) > 0.001) {
+        exportData[@"target_distance"] = @(g_targetDistance);
+    }
+    
+    if (g_capturedRequests.count > 0) {
+        exportData[@"captured_requests"] = g_capturedRequests;
+    }
+    
+    // 转换为JSON
+    NSError *error;
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:exportData 
+                                                       options:NSJSONWritingPrettyPrinted 
+                                                         error:&error];
+    
+    [g_dataLock unlock];
+    
+    if (!error && jsonData) {
+        NSString *jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+        [[UIPasteboard generalPasteboard] setString:jsonString];
+        [self th_showToast:@"数据已导出到剪贴板" duration:2.0];
+    } else {
+        [self th_showToast:@"导出失败" duration:2.0];
+    }
+}
+
+%new
+- (void)th_clearAllData {
+    [g_dataLock lock];
+    
+    [g_capturedRequests removeAllObjects];
+    g_bluedBasicToken = nil;
+    g_currentTargetUid = nil;
+    g_currentLat = 0.0;
+    g_currentLng = 0.0;
+    g_targetDistance = 0.0;
+    g_amapAddress = nil;
+    
+    [g_dataLock unlock];
+    
+    [self th_showToast:@"所有数据已清除" duration:2.0];
+}
+
+%new
+- (void)th_testCoordinateRequest {
+    // 模拟一个坐标请求，用于测试
+    NSString *testUrl = @"https://social.irisgw.cn/users?latitude=22.760733&longitude=114.382814&limit=60&uid=76818159";
+    
+    NSLog(@"TrackHook: 🧪 模拟测试请求: %@", testUrl);
+    
+    NSURLComponents *components = [NSURLComponents componentsWithString:testUrl];
+    NSString *query = components.query;
+    
+    if (query) {
+        NSDictionary *params = parseQueryString(query);
         
-        NSString *urlString = request.URL.absoluteString;
-        NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
-        for (NSURLQueryItem *item in components.queryItems) {
-            if ([item.name isEqualToString:@"latitude"]) {
-                double lat = [item.value doubleValue];
+        for (NSString *key in params) {
+            if ([key isEqualToString:@"latitude"]) {
+                double lat = [params[key] doubleValue];
                 [g_dataLock lock];
                 g_currentLat = lat;
                 [g_dataLock unlock];
-                NSLog(@"TrackHook: 📍 捕获到纬度: %.6f", lat);
-            } else if ([item.name isEqualToString:@"longitude"]) {
-                double lng = [item.value doubleValue];
+                NSLog(@"TrackHook: 🧪 测试纬度: %.6f", lat);
+            } else if ([key isEqualToString:@"longitude"]) {
+                double lng = [params[key] doubleValue];
                 [g_dataLock lock];
                 g_currentLng = lng;
                 [g_dataLock unlock];
-                NSLog(@"TrackHook: 📍 捕获到经度: %.6f", lng);
+                NSLog(@"TrackHook: 🧪 测试经度: %.6f", lng);
             }
         }
-        
-        NSMutableDictionary *requestInfo = [NSMutableDictionary dictionary];
-        requestInfo[@"url"] = urlString;
-        requestInfo[@"timestamp"] = [NSDate date].description;
-        requestInfo[@"params"] = components.queryItems ?: @[];
-        
-        [g_dataLock lock];
-        NSString *key = [NSString stringWithFormat:@"%f", [[NSDate date] timeIntervalSince1970]];
-        g_capturedRequests[key] = requestInfo;
-        [g_dataLock unlock];
     }
     
-    return %orig(request, response, error);
+    [self th_showToast:@"测试请求已执行" duration:2.0];
 }
-%end
 
-%hook NSURLSession
-
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))completionHandler {
-    NSLog(@"TrackHook: 🔗 NSURLSession请求: %@", request.URL.absoluteString);
-    
-    if ([request.URL.absoluteString containsString:@"users/selection"]) {
-        NSLog(@"TrackHook: 🎯 捕获到用户筛选接口: %@", request.URL.absoluteString);
-        
-        NSString *urlString = request.URL.absoluteString;
-        NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
-        for (NSURLQueryItem *item in components.queryItems) {
-            if ([item.name isEqualToString:@"latitude"]) {
-                double lat = [item.value doubleValue];
-                [g_dataLock lock];
-                g_currentLat = lat;
-                [g_dataLock unlock];
-                NSLog(@"TrackHook: 📍 捕获到纬度: %.6f", lat);
-            } else if ([item.name isEqualToString:@"longitude"]) {
-                double lng = [item.value doubleValue];
-                [g_dataLock lock];
-                g_currentLng = lng;
-                [g_dataLock unlock];
-                NSLog(@"TrackHook: 📍 捕获到经度: %.6f", lng);
-            }
-        }
-        
-        NSMutableDictionary *requestInfo = [NSMutableDictionary dictionary];
-        requestInfo[@"url"] = urlString;
-        requestInfo[@"timestamp"] = [NSDate date].description;
-        requestInfo[@"params"] = components.queryItems ?: @[];
-        
-        [g_dataLock lock];
-        NSString *key = [NSString stringWithFormat:@"%f", [[NSDate date] timeIntervalSince1970]];
-        g_capturedRequests[key] = requestInfo;
-        [g_dataLock unlock];
-    }
-    
-    return %orig(request, completionHandler);
+%new
+- (void)th_showSystemLog {
+    // 这里可以添加查看系统日志的功能
+    // 注意：在iOS中直接访问系统日志需要特殊权限
+    [self th_showToast:@"系统日志功能需要额外权限" duration:2.0];
 }
-%end
 
-%ctor {
-    NSLog(@"TrackHook: 🚀 Hook初始化");
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        g_dataLock = [[NSLock alloc] init];
-        g_capturedRequests = [[NSMutableDictionary alloc] init];
-        g_userData = [[NSMutableDictionary alloc] init];
-        NSLog(@"TrackHook: ✅ 全局变量已初始化");
+%new
+- (void)th_showToast:(NSString *)message duration:(NSTimeInterval)duration {
+    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    if (!window) return;
+    
+    UILabel *toastLabel = [[UILabel alloc] init];
+    toastLabel.text = message;
+    toastLabel.textColor = [UIColor whiteColor];
+    toastLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.7];
+    toastLabel.textAlignment = NSTextAlignmentCenter;
+    toastLabel.font = [UIFont systemFontOfSize:14];
+    toastLabel.layer.cornerRadius = 8;
+    toastLabel.clipsToBounds = YES;
+    
+    // 计算大小
+    CGSize textSize = [message sizeWithAttributes:@{NSFontAttributeName: toastLabel.font}];
+    CGFloat padding = 20;
+    CGFloat width = MIN(textSize.width + padding * 2, window.bounds.size.width - 40);
+    CGFloat height = textSize.height + padding;
+    
+    toastLabel.frame = CGRectMake((window.bounds.size.width - width) / 2, 
+                                  window.bounds.size.height - 150, 
+                                  width, height);
+    
+    [window addSubview:toastLabel];
+    
+    // 自动消失
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(duration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [UIView animateWithDuration:0.3 animations:^{
+            toastLabel.alpha = 0;
+        } completion:^(BOOL finished) {
+            [toastLabel removeFromSuperview];
+        }];
     });
-    
-    %init;
 }
+
+// ==================== 高德地图相关Hook ====================
+// 如果应用集成了高德地图，可以尝试Hook获取更精确的地址信息
+%hook AMapLocationManager
+
+- (void)requestLocationWithReGeocode:(BOOL)reGeocode completionBlock:(AMapLocatingCompletionBlock)completionBlock {
+    NSLog(@"TrackHook: 🗺️ 高德地图定位请求，是否需要逆地理编码: %@", reGeocode ? @"是" : @"否");
+    
+    // 修改回调，捕获地址信息
+    AMapLocatingCompletionBlock newBlock = ^(CLLocation *location, AMapLocationReGeocode *regeocode, NSError *error) {
+        if (location) {
+            NSLog(@"TrackHook: 📍 高德定位坐标: %.6f, %.6f", location.coordinate.latitude, location.coordinate.longitude);
+            
+            [g_dataLock lock];
+            g_currentLat = location.coordinate.latitude;
+            g_currentLng = location.coordinate.longitude;
+            [g_dataLock unlock];
+        }
+        
+        if (regeocode) {
+            NSString *address = [NSString stringWithFormat:@"%@%@%@%@", 
+                                regeocode.province ?: @"", 
+                                regeocode.city ?: @"", 
+                                regeocode.district ?: @"", 
+                                regeocode.street ?: @""];
+            
+            NSLog(@"TrackHook: 🏠 高德逆地理编码地址: %@", address);
+            
+            [g_dataLock lock];
+            g_amapAddress = [address copy];
+            [g_dataLock unlock];
+        }
+        
+        // 调用原始回调
+        if (completionBlock) {
+            completionBlock(location, regeocode, error);
+        }
+    };
+    
+    return %orig(reGeocode, newBlock);
+}
+%end
+
+// ==================== 应用生命周期监控 ====================
+%hook UIApplication
+
+- (void)applicationDidBecomeActive:(UIApplication *)application {
+    %orig;
+    NSLog(@"TrackHook: 📱 应用进入前台");
+}
+
+- (void)applicationWillResignActive:(UIApplication *)application {
+    %orig;
+    NSLog(@"TrackHook: 📱 应用进入后台");
+}
+
+- (void)applicationWillTerminate:(UIApplication *)application {
+    %orig;
+    NSLog(@"TrackHook: 📱 应用即将终止");
+}
+%end
