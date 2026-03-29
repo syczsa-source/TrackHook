@@ -22,7 +22,7 @@ static NSMutableDictionary *g_userData = nil;
 // 自定义窗口类
 @interface TrackHookWindow : UIWindow
 @end
-
+ 
 @implementation TrackHookWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hitView = [super hitTest:point withEvent:event];
