@@ -28,32 +28,6 @@ static UIWindow *g_floatWindow = nil;
 @end
 // ==================== 自定义窗口类结束 ====================
 
-// ==================== 类别方法声明 ====================
-// 声明UIViewController的类别方法
-@interface UIViewController (TrackHookPrivate)
-- (NSString *)extractUserIdFromUI;
-- (void)searchViewHierarchy:(UIView *)view result:(NSString **)result;
-- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
-- (void)th_addBtn;
-- (UIWindow *)th_getSafeKeyWindow;
-@end
-
-// 声明NSURLConnection的类别方法（类方法）
-@interface NSURLConnection (TrackHookPrivate)
-+ (BOOL)isTargetRequest:(NSString *)urlString host:(NSString *)host;
-+ (void)extractDataFromURL:(NSString *)urlString;
-@end
-
-// 声明NSURLSession的类别方法
-@interface NSURLSession (TrackHookPrivate)
-- (void)processRequestData:(NSURLRequest *)request;
-- (void)extractDistanceFromJSON:(NSDictionary *)json;
-- (void)extractUserIdFromJSON:(NSDictionary *)json;
-- (void)deepSearchDistanceInObject:(id)obj;
-- (void)deepSearchUserIdInObject:(id)obj;
-@end
-// ==================== 类别声明结束 ====================
-
 %hook UIViewController
 
 %new
@@ -72,7 +46,7 @@ static UIWindow *g_floatWindow = nil;
             }
         }
     }
-    return foundWindow ?: [UIApplication sharedApplication].keyWindow;
+    return foundWindow ?: [[UIApplication sharedApplication] windows].firstObject;
 }
 
 %new
@@ -152,8 +126,7 @@ static UIWindow *g_floatWindow = nil;
     for (UIWindow *window in windows) {
         if (window.hidden || window.alpha <= 0) continue;
         
-        __block NSString *foundUid = nil;
-        [self searchViewHierarchy:window result:&foundUid];
+        NSString *foundUid = [self searchViewHierarchy:window];
         if (foundUid) {
             NSLog(@"TrackHook: ✅ 找到用户ID: %@", foundUid);
             return foundUid;
@@ -165,8 +138,8 @@ static UIWindow *g_floatWindow = nil;
 }
 
 %new
-- (void)searchViewHierarchy:(UIView *)view result:(NSString **)result {
-    if (!view || *result) return;
+- (NSString *)searchViewHierarchy:(UIView *)view {
+    if (!view) return nil;
     
     if ([view isKindOfClass:[UILabel class]]) {
         UILabel *label = (UILabel *)view;
@@ -191,8 +164,7 @@ static UIWindow *g_floatWindow = nil;
                     if (match) {
                         NSString *uid = [text substringWithRange:[match rangeAtIndex:1]];
                         if (uid.length >= 6 && uid.length <= 10) {
-                            *result = uid;
-                            return;
+                            return uid;
                         }
                     }
                 }
@@ -201,51 +173,47 @@ static UIWindow *g_floatWindow = nil;
     }
     
     for (UIView *subview in view.subviews) {
-        [self searchViewHierarchy:subview result:result];
-        if (*result) break;
+        NSString *foundUid = [self searchViewHierarchy:subview];
+        if (foundUid) {
+            return foundUid;
+        }
     }
+    
+    return nil;
 }
 
 %new
 - (void)th_addBtn {
     NSLog(@"TrackHook: 🎨 准备添加悬浮按钮");
     dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindowScene *targetScene = nil;
         if (@available(iOS 13.0, *)) {
-            UIWindowScene *targetScene = nil;
             for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
                     targetScene = (UIWindowScene *)scene;
                     break;
                 }
             }
-            if (!targetScene) {
-                NSLog(@"TrackHook: ❌ 无法获取当前活跃的 WindowScene");
-                return;
-            }
-            if (!g_floatWindow || g_floatWindow.windowScene != targetScene) {
-                CGRect screenBounds = targetScene.coordinateSpace.bounds;
-                g_floatWindow = [[TrackHookWindow alloc] initWithFrame:screenBounds];
+        }
+        
+        if (!targetScene) {
+            NSLog(@"TrackHook: ❌ 无法获取当前活跃的 WindowScene");
+            return;
+        }
+        
+        if (!g_floatWindow || (g_floatWindow.windowScene != targetScene && @available(iOS 13.0, *))) {
+            CGRect screenBounds = targetScene.coordinateSpace.bounds;
+            g_floatWindow = [[TrackHookWindow alloc] initWithFrame:screenBounds];
+            if (@available(iOS 13.0, *)) {
                 g_floatWindow.windowScene = targetScene;
-                g_floatWindow.windowLevel = UIWindowLevelStatusBar + 10;
-                g_floatWindow.backgroundColor = [UIColor clearColor];
-                g_floatWindow.rootViewController = [UIViewController new];
-                g_floatWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
-                g_floatWindow.userInteractionEnabled = YES;
-                g_floatWindow.hidden = NO;
-                NSLog(@"TrackHook: 🪟 已创建独立悬浮窗口");
             }
-        } else {
-            // iOS 13以下版本
-            if (!g_floatWindow) {
-                g_floatWindow = [[TrackHookWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-                g_floatWindow.windowLevel = UIWindowLevelStatusBar + 10;
-                g_floatWindow.backgroundColor = [UIColor clearColor];
-                g_floatWindow.rootViewController = [UIViewController new];
-                g_floatWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
-                g_floatWindow.userInteractionEnabled = YES;
-                g_floatWindow.hidden = NO;
-                NSLog(@"TrackHook: 🪟 已创建独立悬浮窗口 (iOS 12)");
-            }
+            g_floatWindow.windowLevel = UIWindowLevelStatusBar + 10;
+            g_floatWindow.backgroundColor = [UIColor clearColor];
+            g_floatWindow.rootViewController = [UIViewController new];
+            g_floatWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
+            g_floatWindow.userInteractionEnabled = YES;
+            g_floatWindow.hidden = NO;
+            NSLog(@"TrackHook: 🪟 已创建独立悬浮窗口");
         }
         
         UIButton *oldBtn = [g_floatWindow viewWithTag:TRACK_BTN_TAG];
