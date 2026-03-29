@@ -22,19 +22,12 @@ static UIButton *g_floatBtn = nil;
 
 @interface NSURLSession (TrackHookMethods)
 - (void)processTargetRequest:(NSURLRequest *)request;
-- (void)extractTargetUidFromURL:(NSString *)urlString;
-- (void)parseResponseData:(NSData *)data forRequest:(NSURLRequest *)request;
-- (void)parseNearbyUserList:(NSDictionary *)json;
-- (void)parseUserDetail:(NSDictionary *)json;
 @end
 
 @interface UIViewController (TrackHookMethods)
 - (void)addFloatButton;
 - (void)th_onPan:(UIPanGestureRecognizer *)pan;
 - (void)th_onBtnClick;
-- (NSString *)th_extractUserIdFromUI;
-- (NSString *)th_searchUidInView:(UIView *)view;
-- (void)th_showToast:(NSString *)message duration:(NSTimeInterval)duration;
 @end
 // ===================== 类别声明结束 =====================
 
