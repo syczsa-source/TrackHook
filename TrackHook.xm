@@ -4,6 +4,7 @@
 #import <CoreLocation/CoreLocation.h>
 #import <objc/runtime.h>
 
+// ===================== 全局变量声明 =====================
 // 全局线程安全锁
 static dispatch_semaphore_t g_dataLock;
 // 全局用户信息存储字典（key: 用户UID字符串）
@@ -22,7 +23,7 @@ static double g_targetDistance = -1.0;
 // 全局悬浮按钮
 static UIButton *g_floatBtn = nil;
 
-#pragma mark - 工具类分类
+// ===================== 工具类分类（必须写在Hook块之前） =====================
 @interface NSURLConnection (TrackHook)
 + (BOOL)isTargetRequest:(NSString *)urlString host:(NSString *)host;
 + (void)extractMyLocationFromURL:(NSString *)urlString;
@@ -103,51 +104,16 @@ static UIButton *g_floatBtn = nil;
 }
 @end
 
-#pragma mark - NSURLSession 请求Hook
+// ===================== NSURLSession Hook块（先写%new方法，再写Hook方法） =====================
 %hook NSURLSession
 
-// Hook 带completionHandler的请求创建（覆盖90%的App请求）
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    // 过滤并处理目标请求
-    [self processTargetRequest:request];
-    
-    // 拦截回调，解析响应数据
-    void (^customCompletion)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (data && !error) {
-            [self parseResponseData:data forRequest:request];
-        }
-        // 执行原回调
-        if (completionHandler) {
-            completionHandler(data, response, error);
-        }
-    };
-    
-    return %orig(request, customCompletion);
-}
-
-// Hook 带URL的便捷请求创建
-- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    NSURLRequest *request = [NSURLRequest requestWithURL:url];
-    [self processTargetRequest:request];
-    
-    void (^customCompletion)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (data && !error) {
-            [self parseResponseData:data forRequest:request];
-        }
-        if (completionHandler) {
-            completionHandler(data, response, error);
-        }
-    };
-    
-    return %orig(url, customCompletion);
-}
-
+// -------------------- 先写所有%new新增方法（必须在前，编译器先识别） --------------------
 %new
 - (void)processTargetRequest:(NSURLRequest *)request {
     NSString *urlString = request.URL.absoluteString;
     NSString *host = request.URL.host;
     
-    // 判断是否为目标请求
+    // 过滤并处理目标请求
     if (![NSURLConnection isTargetRequest:urlString host:host]) return;
     
     // 1. 抓取认证Token
@@ -327,19 +293,49 @@ static UIButton *g_floatBtn = nil;
     NSLog(@"TrackHook: ✅ 从详情页拿到用户 %@ 完整坐标: %.6f, %.6f 距离: %.2fkm", uid, lat, lng, distance);
 }
 
-%end
-
-#pragma mark - UIViewController 悬浮按钮Hook
-%hook UIViewController
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig(animated);
-    // 确保悬浮按钮在主线程添加
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self addFloatButton];
-    });
+// -------------------- 再写需要Hook的原生方法（在后，此时编译器已识别所有%new方法） --------------------
+// Hook 带completionHandler的请求创建（覆盖90%的App请求）
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    // 过滤并处理目标请求
+    [self processTargetRequest:request];
+    
+    // 拦截回调，解析响应数据
+    void (^customCompletion)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (data && !error) {
+            [self parseResponseData:data forRequest:request];
+        }
+        // 执行原回调
+        if (completionHandler) {
+            completionHandler(data, response, error);
+        }
+    };
+    
+    return %orig(request, customCompletion);
 }
 
+// Hook 带URL的便捷请求创建
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    NSURLRequest *request = [NSURLRequest requestWithURL:url];
+    [self processTargetRequest:request];
+    
+    void (^customCompletion)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (data && !error) {
+            [self parseResponseData:data forRequest:request];
+        }
+        if (completionHandler) {
+            completionHandler(data, response, error);
+        }
+    };
+    
+    return %orig(url, customCompletion);
+}
+
+%end
+
+// ===================== UIViewController Hook块（同样先写%new方法，再写Hook方法） =====================
+%hook UIViewController
+
+// -------------------- 先写所有%new新增方法 --------------------
 %new
 - (void)addFloatButton {
     // 避免重复创建
@@ -582,9 +578,18 @@ static UIButton *g_floatBtn = nil;
     });
 }
 
+// -------------------- 再写需要Hook的原生方法 --------------------
+- (void)viewDidAppear:(BOOL)animated {
+    %orig(animated);
+    // 确保悬浮按钮在主线程添加
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self addFloatButton];
+    });
+}
+
 %end
 
-#pragma mark - 初始化构造函数
+// ===================== 初始化构造函数 =====================
 %ctor {
     NSLog(@"TrackHook: 🚀 插件加载成功");
     
