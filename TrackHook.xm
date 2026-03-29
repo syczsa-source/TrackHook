@@ -117,6 +117,7 @@ static UIButton *g_floatBtn = nil;
                 dispatch_semaphore_wait(g_dataLock, DISPATCH_TIME_FOREVER);
                 g_bluedBasicToken = [token copy];
                 dispatch_semaphore_signal(g_dataLock);
+                NSLog(@"TrackHook: ✅ 成功抓取Blued Basic Token");
             }
         }
         
@@ -222,12 +223,14 @@ static UIButton *g_floatBtn = nil;
 %ctor {
     NSLog(@"TrackHook: 🚀 插件加载");
     
+    // 初始化线程锁（关键修复）
+    g_dataLock = dispatch_semaphore_create(1);
+    
     // 延迟初始化全局变量
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        g_dataLock = dispatch_semaphore_create(1);
         g_userInfoDict = [NSMutableDictionary dictionary];
     });
     
-    %init;
+    %init; // 必须添加的初始化调用（关键修复）
 }
