@@ -3,6 +3,20 @@
 #import <CoreLocation/CoreLocation.h>
 #import <objc/runtime.h>
 
+// 添加UIViewController的category声明
+@interface UIViewController (TrackHookMethods)
+- (UIWindow *)th_getSafeKeyWindow;
+- (void)th_showToast:(NSString *)msg duration:(NSTimeInterval)dur;
+- (void)th_handlePan:(UIPanGestureRecognizer *)pan;
+- (void)th_addBtn;
+- (NSString *)searchViewHierarchy:(UIView *)view;
+- (NSString *)extractUserIdFromUI;
+- (void)th_exportData;
+- (void)th_showRequestsList;
+- (void)th_onAdvancedBtnClick;
+- (void)th_onBtnClick;
+@end
+
 // 全局变量声明
 static NSLock *g_dataLock = nil;
 static NSString *g_bluedBasicToken = nil;
@@ -22,7 +36,7 @@ static NSMutableDictionary *g_userData = nil;
 // 自定义窗口类
 @interface TrackHookWindow : UIWindow
 @end
- 
+
 @implementation TrackHookWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hitView = [super hitTest:point withEvent:event];
