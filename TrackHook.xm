@@ -1,35 +1,46 @@
-// TrackHook.xm
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <CoreLocation/CoreLocation.h>
-#import <objc/runtime.h>
 
 // ===================== 全局变量声明 =====================
-// 全局线程安全锁
-static dispatch_semaphore_t g_dataLock;
-// 全局用户信息存储字典（key: 用户UID字符串）
+static dispatch_semaphore_t g_dataLock = NULL;
 static NSMutableDictionary *g_userInfoDict = nil;
-// 当前打开的目标用户UID
 static NSString *g_currentTargetUid = nil;
-// 抓取的Blued认证Token
 static NSString *g_bluedBasicToken = nil;
-// 自身定位坐标
 static double g_myLat = 0.0;
 static double g_myLng = 0.0;
-// 目标用户坐标与距离
 static double g_targetLat = 0.0;
 static double g_targetLng = 0.0;
 static double g_targetDistance = -1.0;
-// 全局悬浮按钮
 static UIButton *g_floatBtn = nil;
 
-// ===================== 工具类分类（必须写在Hook块之前） =====================
-@interface NSURLConnection (TrackHook)
+// ===================== 类别方法声明 =====================
+@interface NSURLConnection (TrackHookMethods)
 + (BOOL)isTargetRequest:(NSString *)urlString host:(NSString *)host;
 + (void)extractMyLocationFromURL:(NSString *)urlString;
 @end
 
-@implementation NSURLConnection (TrackHook)
+@interface NSURLSession (TrackHookMethods)
+- (void)processTargetRequest:(NSURLRequest *)request;
+- (void)extractTargetUidFromURL:(NSString *)urlString;
+- (void)parseResponseData:(NSData *)data forRequest:(NSURLRequest *)request;
+- (void)parseNearbyUserList:(NSDictionary *)json;
+- (void)parseUserDetail:(NSDictionary *)json;
+@end
+
+@interface UIViewController (TrackHookMethods)
+- (void)addFloatButton;
+- (void)th_onPan:(UIPanGestureRecognizer *)pan;
+- (void)th_onBtnClick;
+- (NSString *)th_extractUserIdFromUI;
+- (NSString *)th_searchUidInView:(UIView *)view;
+- (void)th_showToast:(NSString *)message duration:(NSTimeInterval)duration;
+@end
+// ===================== 类别声明结束 =====================
+
+%hook NSURLConnection
+
+%new
 + (BOOL)isTargetRequest:(NSString *)urlString host:(NSString *)host {
     if (!host && !urlString) return NO;
     
@@ -76,6 +87,7 @@ static UIButton *g_floatBtn = nil;
     return NO;
 }
 
+%new
 + (void)extractMyLocationFromURL:(NSString *)urlString {
     if (!urlString || urlString.length == 0) return;
     
@@ -102,12 +114,11 @@ static UIButton *g_floatBtn = nil;
         }
     }
 }
-@end
 
-// ===================== NSURLSession Hook块（先写%new方法，再写Hook方法） =====================
+%end
+
 %hook NSURLSession
 
-// -------------------- 先写所有%new新增方法（必须在前，编译器先识别） --------------------
 %new
 - (void)processTargetRequest:(NSURLRequest *)request {
     NSString *urlString = request.URL.absoluteString;
@@ -293,8 +304,6 @@ static UIButton *g_floatBtn = nil;
     NSLog(@"TrackHook: ✅ 从详情页拿到用户 %@ 完整坐标: %.6f, %.6f 距离: %.2fkm", uid, lat, lng, distance);
 }
 
-// -------------------- 再写需要Hook的原生方法（在后，此时编译器已识别所有%new方法） --------------------
-// Hook 带completionHandler的请求创建（覆盖90%的App请求）
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
     // 过滤并处理目标请求
     [self processTargetRequest:request];
@@ -313,7 +322,6 @@ static UIButton *g_floatBtn = nil;
     return %orig(request, customCompletion);
 }
 
-// Hook 带URL的便捷请求创建
 - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
     NSURLRequest *request = [NSURLRequest requestWithURL:url];
     [self processTargetRequest:request];
@@ -332,44 +340,44 @@ static UIButton *g_floatBtn = nil;
 
 %end
 
-// ===================== UIViewController Hook块（同样先写%new方法，再写Hook方法） =====================
 %hook UIViewController
 
-// -------------------- 先写所有%new新增方法 --------------------
 %new
 - (void)addFloatButton {
     // 避免重复创建
     if (g_floatBtn && g_floatBtn.superview) return;
     
-    UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
-    if (!keyWindow) return;
-    
-    // 创建悬浮按钮
-    g_floatBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    g_floatBtn.frame = CGRectMake(keyWindow.bounds.size.width - 70, keyWindow.bounds.size.height - 200, 60, 60);
-    g_floatBtn.backgroundColor = [UIColor systemBlueColor];
-    [g_floatBtn setTitle:@"定位" forState:UIControlStateNormal];
-    [g_floatBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    g_floatBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
-    g_floatBtn.layer.cornerRadius = 30;
-    g_floatBtn.layer.masksToBounds = YES;
-    g_floatBtn.layer.shadowColor = [UIColor blackColor].CGColor;
-    g_floatBtn.layer.shadowOpacity = 0.3;
-    g_floatBtn.layer.shadowRadius = 5;
-    g_floatBtn.layer.shadowOffset = CGSizeMake(0, 2);
-    
-    // 添加点击事件
-    [g_floatBtn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
-    
-    // 添加拖拽手势
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_onPan:)];
-    [g_floatBtn addGestureRecognizer:pan];
-    
-    // 添加到窗口
-    [keyWindow addSubview:g_floatBtn];
-    [keyWindow bringSubviewToFront:g_floatBtn];
-    
-    NSLog(@"TrackHook: ✅ 悬浮按钮创建成功");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
+        if (!keyWindow) return;
+        
+        // 创建悬浮按钮
+        g_floatBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        g_floatBtn.frame = CGRectMake(keyWindow.bounds.size.width - 70, keyWindow.bounds.size.height - 200, 60, 60);
+        g_floatBtn.backgroundColor = [UIColor systemBlueColor];
+        [g_floatBtn setTitle:@"定位" forState:UIControlStateNormal];
+        [g_floatBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        g_floatBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+        g_floatBtn.layer.cornerRadius = 30;
+        g_floatBtn.layer.masksToBounds = YES;
+        g_floatBtn.layer.shadowColor = [UIColor blackColor].CGColor;
+        g_floatBtn.layer.shadowOpacity = 0.3;
+        g_floatBtn.layer.shadowRadius = 5;
+        g_floatBtn.layer.shadowOffset = CGSizeMake(0, 2);
+        
+        // 添加点击事件
+        [g_floatBtn addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
+        
+        // 添加拖拽手势
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_onPan:)];
+        [g_floatBtn addGestureRecognizer:pan];
+        
+        // 添加到窗口
+        [keyWindow addSubview:g_floatBtn];
+        [keyWindow bringSubviewToFront:g_floatBtn];
+        
+        NSLog(@"TrackHook: ✅ 悬浮按钮创建成功");
+    });
 }
 
 %new
@@ -578,7 +586,6 @@ static UIButton *g_floatBtn = nil;
     });
 }
 
-// -------------------- 再写需要Hook的原生方法 --------------------
 - (void)viewDidAppear:(BOOL)animated {
     %orig(animated);
     // 确保悬浮按钮在主线程添加
@@ -589,7 +596,6 @@ static UIButton *g_floatBtn = nil;
 
 %end
 
-// ===================== 初始化构造函数 =====================
 %ctor {
     NSLog(@"TrackHook: 🚀 插件加载成功");
     
@@ -601,4 +607,6 @@ static UIButton *g_floatBtn = nil;
     dispatch_once(&onceToken, ^{
         g_userInfoDict = [NSMutableDictionary dictionary];
     });
+    
+    %init;
 }
