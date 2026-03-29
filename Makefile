@@ -1,14 +1,12 @@
 # 架构支持
-ARCHS = arm64 arm64e
+ARCHS = arm64
 
-# 目标配置
-TARGET = iphone:clang:latest:12.0
+# 目标配置 - 调整为iOS 13.0，以适配代码中的UIWindowScene
+TARGET = iphone:clang:latest:13.0
 
 # 指定注入的应用
-INSTALL_TARGET_PROCESSES = SpringBoard
-INSTALL_TARGET_PROCESSES += com.bluecity.blued
+INSTALL_TARGET_PROCESSES = com.bluecity.blued
 
-# 包含 Theos 公共配置
 include $(THEOS)/makefiles/common.mk
 
 # 项目名称
@@ -25,13 +23,12 @@ TrackHook_LDFLAGS = -undefined dynamic_lookup
 # 忽略并行构建提示
 THEOS_IGNORE_PARALLEL_BUILDING_NOTICE = yes
 
-# 包含 Theos 的 tweak 构建规则
 include $(THEOS_MAKE_PATH)/tweak.mk
 
-# 安装后重启 SpringBoard
+# 安装后重启SpringBoard
 after-install::
 	install.exec "killall -9 SpringBoard"
 
-# 清理规则
-clean::
-	@rm -rf .theos packages *.deb
+# 打包后清理
+after-package::
+	@rm -rf $(THEOS_STAGING_DIR)/usr/lib/.debug
