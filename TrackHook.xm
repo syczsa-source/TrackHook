@@ -93,95 +93,6 @@ static NSDictionary *parseQueryString(NSString *query) {
 }
 
 %new
-- (void)th_onButtonPan:(UIPanGestureRecognizer *)pan {
-    UIButton *button = (UIButton *)pan.view;
-    CGPoint translation = [pan translationInView:button.superview];
-    
-    CGPoint center = button.center;
-    center.x += translation.x;
-    center.y += translation.y;
-    
-    CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
-    CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
-    
-    center.x = MAX(30, MIN(screenWidth - 30, center.x));
-    center.y = MAX(50, MIN(screenHeight - 50, center.y));
-    
-    button.center = center;
-    [pan setTranslation:CGPointZero inView:button.superview];
-}
-
-%new
-- (void)addTrackHookButton {
-    UIButton *trackButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    trackButton.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 70, 100, 60, 60);
-    trackButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:0.9];
-    trackButton.layer.cornerRadius = 30;
-    trackButton.layer.shadowColor = [UIColor blackColor].CGColor;
-    trackButton.layer.shadowOffset = CGSizeMake(0, 2);
-    trackButton.layer.shadowOpacity = 0.3;
-    trackButton.layer.shadowRadius = 4;
-    
-    [trackButton setTitle:@"TH" forState:UIControlStateNormal];
-    [trackButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    trackButton.titleLabel.font = [UIFont boldSystemFontOfSize:14];
-    
-    [trackButton addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
-    
-    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(th_onAdvancedBtnClick)];
-    [trackButton addGestureRecognizer:longPress];
-    
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_onButtonPan:)];
-    [trackButton addGestureRecognizer:pan];
-    
-    UIWindow *window = [UIApplication sharedApplication].keyWindow;
-    if (window) {
-        [window addSubview:trackButton];
-        [window bringSubviewToFront:trackButton];
-    }
-}
-
-%new
-- (void)th_showAllRequests {
-    [g_dataLock lock];
-    
-    NSMutableString *requestsInfo = [NSMutableString string];
-    [requestsInfo appendString:@"📋 所有捕获的请求\n\n"];
-    
-    NSArray *sortedKeys = [[g_capturedRequests allKeys] sortedArrayUsingSelector:@selector(compare:)];
-    
-    if (sortedKeys.count == 0) {
-        [requestsInfo appendString:@"❌ 无捕获的请求\n"];
-    } else {
-        for (NSString *key in sortedKeys) {
-            NSDictionary *req = g_capturedRequests[key];
-            NSString *timestamp = req[@"timestamp"];
-            NSString *type = req[@"type"] ?: @"unknown";
-            NSString *url = req[@"url"];
-            
-            [requestsInfo appendFormat:@"[%@] %@\nURL: %@\n", timestamp, type, url];
-            
-            NSDictionary *params = req[@"params"];
-            if (params && params.count > 0) {
-                [requestsInfo appendString:@"参数:\n"];
-                for (NSString *paramKey in params) {
-                    NSString *value = params[paramKey];
-                    if (value.length > 50) value = [NSString stringWithFormat:@"%@...", [value substringToIndex:50]];
-                    [requestsInfo appendFormat:@"  %@: %@\n", paramKey, value];
-                }
-            }
-            [requestsInfo appendString:@"\n"];
-        }
-    }
-    
-    [g_dataLock unlock];
-    
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"所有请求" message:requestsInfo preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-%new
 - (void)th_exportAllData {
     [g_dataLock lock];
     
@@ -254,6 +165,46 @@ static NSDictionary *parseQueryString(NSString *query) {
 }
 
 %new
+- (void)th_showAllRequests {
+    [g_dataLock lock];
+    
+    NSMutableString *requestsInfo = [NSMutableString string];
+    [requestsInfo appendString:@"📋 所有捕获的请求\n\n"];
+    
+    NSArray *sortedKeys = [[g_capturedRequests allKeys] sortedArrayUsingSelector:@selector(compare:)];
+    
+    if (sortedKeys.count == 0) {
+        [requestsInfo appendString:@"❌ 无捕获的请求\n"];
+    } else {
+        for (NSString *key in sortedKeys) {
+            NSDictionary *req = g_capturedRequests[key];
+            NSString *timestamp = req[@"timestamp"];
+            NSString *type = req[@"type"] ?: @"unknown";
+            NSString *url = req[@"url"];
+            
+            [requestsInfo appendFormat:@"[%@] %@\nURL: %@\n", timestamp, type, url];
+            
+            NSDictionary *params = req[@"params"];
+            if (params && params.count > 0) {
+                [requestsInfo appendString:@"参数:\n"];
+                for (NSString *paramKey in params) {
+                    NSString *value = params[paramKey];
+                    if (value.length > 50) value = [NSString stringWithFormat:@"%@...", [value substringToIndex:50]];
+                    [requestsInfo appendFormat:@"  %@: %@\n", paramKey, value];
+                }
+            }
+            [requestsInfo appendString:@"\n"];
+        }
+    }
+    
+    [g_dataLock unlock];
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"所有请求" message:requestsInfo preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+%new
 - (void)th_onAdvancedBtnClick {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"高级功能" message:@"选择要执行的操作" preferredStyle:UIAlertControllerStyleActionSheet];
     
@@ -276,6 +227,55 @@ static NSDictionary *parseQueryString(NSString *query) {
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+%new
+- (void)th_onButtonPan:(UIPanGestureRecognizer *)pan {
+    UIButton *button = (UIButton *)pan.view;
+    CGPoint translation = [pan translationInView:button.superview];
+    
+    CGPoint center = button.center;
+    center.x += translation.x;
+    center.y += translation.y;
+    
+    CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
+    CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
+    
+    center.x = MAX(30, MIN(screenWidth - 30, center.x));
+    center.y = MAX(50, MIN(screenHeight - 50, center.y));
+    
+    button.center = center;
+    [pan setTranslation:CGPointZero inView:button.superview];
+}
+
+%new
+- (void)addTrackHookButton {
+    UIButton *trackButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    trackButton.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 70, 100, 60, 60);
+    trackButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:0.9];
+    trackButton.layer.cornerRadius = 30;
+    trackButton.layer.shadowColor = [UIColor blackColor].CGColor;
+    trackButton.layer.shadowOffset = CGSizeMake(0, 2);
+    trackButton.layer.shadowOpacity = 0.3;
+    trackButton.layer.shadowRadius = 4;
+    
+    [trackButton setTitle:@"TH" forState:UIControlStateNormal];
+    [trackButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    trackButton.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    
+    [trackButton addTarget:self action:@selector(th_onBtnClick) forControlEvents:UIControlEventTouchUpInside];
+    
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(th_onAdvancedBtnClick)];
+    [trackButton addGestureRecognizer:longPress];
+    
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(th_onButtonPan:)];
+    [trackButton addGestureRecognizer:pan];
+    
+    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    if (window) {
+        [window addSubview:trackButton];
+        [window bringSubviewToFront:trackButton];
+    }
 }
 
 %new
