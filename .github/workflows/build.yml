@@ -1,4 +1,4 @@
-name: 编译Theos插件
+name: 编译 TrackHook 插件
 on:
   push:
     branches: [ main ]
@@ -8,21 +8,22 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      - name: 拉取代码
+      - name: 拉取项目代码
         uses: actions/checkout@v4
 
-      - name: 安装Theos
-        run: |
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+      # 🔥 核心修复：使用专用Theos编译Action（内置SDK，无网络报错）
+      - name: 配置 Theos 编译环境
+        uses: yiichris/Make-Theos@main
+        with:
+          theos-version: 'latest'
 
-      - name: 编译插件
+      - name: 清理并编译插件
         run: |
           make clean
-          make package
+          make package FINALPACKAGE=1
 
-      - name: 上传deb包
+      - name: 上传 DEB 安装包
         uses: actions/upload-artifact@v4
         with:
-          name: DebPackage
+          name: TrackHook_Deb
           path: packages/*.deb
