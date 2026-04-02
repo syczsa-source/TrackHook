@@ -16,13 +16,15 @@ jobs:
           echo "THEOS=${HOME}/theos" >> $GITHUB_ENV
           echo "PATH=${HOME}/theos/bin:$PATH" >> $GITHUB_ENV
 
-      - name: 安装 Theos + 签名工具 ldid
+      - name: 安装依赖 + Theos
         run: |
+          # 安装签名工具+换行符转换工具
+          brew install ldid dos2unix
+          # 转换control为Unix换行符（修复核心报错）
+          dos2unix control
           # 安装Theos
           git clone --recursive https://github.com/theos/theos.git $THEOS
-          # 🔥 核心修复：安装ldid签名工具（解决报错）
-          brew install ldid
-          # 修复Xcode SDK路径
+          # 配置Xcode
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
       - name: 编译打包 deb
@@ -33,5 +35,5 @@ jobs:
       - name: 上传DEB插件包
         uses: actions/upload-artifact@v4
         with:
-          name: TrackHook_成品
+          name: TrackHook_成品插件
           path: packages/*.deb
