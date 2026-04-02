@@ -1,10 +1,9 @@
-Package: com.syczsa.trackhook
-Name: TrackHook
-Version: 1.0.0
-Architecture: arm64
+Package: com.bluecity.distance
+Name: Blued距离查询
+Version: 1.0
+Architecture: iphoneos-arm64
+Description: 自动抓令牌/坐标/ID 主页查距离
 Depends: mobilesubstrate
+Maintainer: dev
+Author: dev
 Section: Tweaks
-Priority: optional
-Maintainer: syczsa-source
-Author: syczsa-source
-Description: Blued用户递归定位插件
