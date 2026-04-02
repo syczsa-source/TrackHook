@@ -2,7 +2,7 @@
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
 
-// 全局缓存
+// 全局缓存变量
 static NSString *gAuthToken = nil;
 static NSString *gTargetUserID = nil;
 static double gMyLatitude = 0.0;
@@ -22,7 +22,7 @@ void showAlert(NSString *title, NSString *msg) {
     });
 }
 
-// 距离计算（Haversine公式）
+// 距离计算
 double calculateDistance(double myLat, double myLon, double userLat, double userLon) {
     double rad = M_PI / 180.0;
     double dLat = (userLat - myLat) * rad;
@@ -32,7 +32,7 @@ double calculateDistance(double myLat, double myLon, double userLat, double user
     return EARTH_RADIUS * c;
 }
 
-// 提取自身实时坐标（从/users/selection接口URL）
+// 提取自身经纬度
 void extractMyLocationFromURL(NSURL *url) {
     if (!url || ![[url host] containsString:@"social.irisgw.cn"]) return;
     NSURLComponents *comps = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
@@ -42,7 +42,7 @@ void extractMyLocationFromURL(NSURL *url) {
     }
 }
 
-// 提取对方用户ID（从个人主页URL /users/xxx）
+// 提取对方用户ID
 NSString *extractTargetUserID(NSURL *url) {
     if (!url || ![[url host] containsString:@"argo.blued.cn"]) return nil;
     NSArray *parts = url.pathComponents;
@@ -52,8 +52,8 @@ NSString *extractTargetUserID(NSURL *url) {
     return nil;
 }
 
-// 调用接口查询对方位置/距离
-void requestUserDistance() {
+// 查询距离
+void requestUserDistance(void) {
     if (!gAuthToken || !gTargetUserID || gMyLatitude == 0 || gMyLongitude == 0) {
         showAlert(@"提示", @"未获取到令牌/位置/用户ID");
         return;
@@ -63,11 +63,10 @@ void requestUserDistance() {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url timeoutInterval:10];
     req.HTTPMethod = @"POST";
 
-    // ✅ 完全匹配你抓包的请求头，修正了笔误
     [req setValue:@"zh-CN" forHTTPHeaderField:@"Accept-Language"];
-    [req setValue:@"a0001i" forHTTPHeaderField:@"Channel"]; // 修正：之前少了一个0，现在和抓包一致
+    [req setValue:@"a0001i" forHTTPHeaderField:@"Channel"];
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148" forHTTPHeaderField:@"ua"]; // 补充：之前漏了ua头
+    [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148" forHTTPHeaderField:@"ua"];
     [req setValue:@"dark" forHTTPHeaderField:@"X-CLIENT-COLOR"];
     [req setValue:@"social.irisgw.cn" forHTTPHeaderField:@"Host"];
     [req setValue:@"Mozilla/5.0 (iPhone; iOS 16.5; Scale/3.00; CPU iPhone OS 16_5 like Mac OS X) iOS/120547_2.54.7_6552_9711 (Asia/Shanghai) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 ibb/1.0.0 app/7" forHTTPHeaderField:@"User-Agent"];
@@ -76,7 +75,6 @@ void requestUserDistance() {
     [req setValue:@"br, gzip, deflate" forHTTPHeaderField:@"Accept-Encoding"];
     [req setValue:@"" forHTTPHeaderField:@"Cookie"];
 
-    // 请求体：使用实时抓取的自身坐标
     NSDictionary *body = @{
         @"self_location": @{
             @"latitude": [NSString stringWithFormat:@"%.15f", gMyLatitude],
@@ -91,10 +89,7 @@ void requestUserDistance() {
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
-        if (err || !data) { 
-            showAlert(@"请求失败", err.localizedDescription ?: @"网络错误"); 
-            return; 
-        }
+        if (err || !data) { showAlert(@"请求失败", err.localizedDescription ?: @"网络错误"); return; }
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         NSArray *avatars = json[@"avatars"];
         for (NSDictionary *user in avatars) {
@@ -103,17 +98,17 @@ void requestUserDistance() {
                 double lat = [user[@"latitude"] doubleValue];
                 double lon = [user[@"longitude"] doubleValue];
                 double dist = calculateDistance(gMyLatitude, gMyLongitude, lat, lon);
-                NSString *msg = [NSString stringWithFormat:@"对方ID：%@\n距离：%.1f 米\n坐标：%.6f, %.6f", uid, dist, lat, lon];
+                NSString *msg = [NSString stringWithFormat:@"对方ID：%@\n距离：%.1f 米", uid, dist];
                 showAlert(@"查询成功", msg);
                 return;
             }
         }
-        showAlert(@"未找到", @"对方不在当前地图范围内");
+        showAlert(@"未找到", @"对方不在地图范围");
     }];
     [task resume];
 }
 
-// 添加悬浮按钮
+// 悬浮按钮
 void addFloatBtn() {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gFloatButton) return;
@@ -129,7 +124,6 @@ void addFloatBtn() {
     });
 }
 
-// 移除悬浮按钮
 void removeFloatBtn() {
     dispatch_async(dispatch_get_main_queue(), ^{
         [gFloatButton removeFromSuperview];
@@ -137,42 +131,54 @@ void removeFloatBtn() {
     });
 }
 
-%ctor {
-    // 1. 自动抓取Authorization令牌（永不过期）
-    %hook NSURLRequest
-    - (NSDictionary *)allHTTPHeaderFields {
-        NSDictionary *orig = %orig;
-        NSString *auth = orig[@"Authorization"];
-        if (auth && [auth hasPrefix:@"Basic "]) gAuthToken = auth;
-        return orig;
-    }
-    %end
+// ==============================================
+// 🔥 修复核心：%hook 全部写在全局作用域，不嵌套
+// ==============================================
 
-    // 2. 自动抓取自身实时坐标（从/users/selection接口）
-    %hook NSURLSessionTask
-    - (NSURL *)currentRequest {
-        NSURL *url = %orig;
-        extractMyLocationFromURL(url);
-        return url;
+// 1. 抓取 Authorization 令牌
+%hook NSURLRequest
+- (NSDictionary *)allHTTPHeaderFields {
+    NSDictionary *orig = %orig;
+    NSString *auth = orig[@"Authorization"];
+    if (auth && [auth hasPrefix:@"Basic "]) {
+        gAuthToken = auth;
     }
-    %end
+    return orig;
+}
+%end
 
-    // 3. 个人主页自动抓取对方ID + 显示悬浮按钮
-    %hook UIViewController
-    - (void)viewDidLoad {
-        %orig;
-        for (UIView *v in self.view.subviews) {
-            if ([v isKindOfClass:[WKWebView class]]) {
-                WKWebView *web = (WKWebView *)v;
-                gTargetUserID = extractTargetUserID(web.URL);
-                if (gTargetUserID) addFloatBtn();
+// 2. 抓取自身实时坐标
+%hook NSURLSessionTask
+- (NSURL *)currentRequest {
+    NSURL *url = %orig;
+    extractMyLocationFromURL(url);
+    return url;
+}
+%end
+
+// 3. 个人主页抓取用户ID + 按钮
+%hook UIViewController
+- (void)viewDidLoad {
+    %orig;
+    for (UIView *v in self.view.subviews) {
+        if ([v isKindOfClass:[WKWebView class]]) {
+            WKWebView *web = (WKWebView *)v;
+            gTargetUserID = extractTargetUserID(web.URL);
+            if (gTargetUserID) {
+                addFloatBtn();
             }
         }
     }
-    - (void)viewWillDisappear:(BOOL)animated {
-        %orig;
-        removeFloatBtn();
-        gTargetUserID = nil;
-    }
-    %end
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    %orig;
+    removeFloatBtn();
+    gTargetUserID = nil;
+}
+%end
+
+// 构造函数（仅初始化，无hook）
+%ctor {
+    // 空即可，所有hook已在全局定义
 }
