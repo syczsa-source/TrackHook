@@ -2,12 +2,43 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Filter</key>
+    <!-- 🔴 必须：允许网络请求（否则接口会被系统拦截） -->
+    <key>NSAppTransportSecurity</key>
     <dict>
-        <key>Bundles</key>
-        <array>
-            <string>com.bluecity.blued</string>
-        </array>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+        <!-- 可选：更安全的域名白名单（替代上面的全局允许） -->
+        <!--
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>social.irisgw.cn</key>
+            <dict>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+            <key>argo.blued.cn</key>
+            <dict>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+        </dict>
+        -->
     </dict>
+
+    <!-- 包标识（必须和control里的Package完全一致） -->
+    <key>CFBundleIdentifier</key>
+    <string>com.your.trackhook</string>
+    <!-- 插件名称（对应项目名TrackHook） -->
+    <key>CFBundleName</key>
+    <string>TrackHook</string>
+    <!-- 版本号 -->
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
 </dict>
 </plist>
