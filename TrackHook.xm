@@ -22,7 +22,7 @@ void showAlert(NSString *title, NSString *msg) {
     });
 }
 
-// 距离计算
+// 距离计算（Haversine公式）
 double calculateDistance(double myLat, double myLon, double userLat, double userLon) {
     double rad = M_PI / 180.0;
     double dLat = (userLat - myLat) * rad;
@@ -32,7 +32,7 @@ double calculateDistance(double myLat, double myLon, double userLat, double user
     return EARTH_RADIUS * c;
 }
 
-// 提取自身经纬度
+// 提取自身实时坐标（从/users/selection接口URL）
 void extractMyLocationFromURL(NSURL *url) {
     if (!url || ![[url host] containsString:@"social.irisgw.cn"]) return;
     NSURLComponents *comps = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
@@ -42,7 +42,7 @@ void extractMyLocationFromURL(NSURL *url) {
     }
 }
 
-// 提取对方用户ID
+// 提取对方用户ID（从个人主页URL /users/xxx）
 NSString *extractTargetUserID(NSURL *url) {
     if (!url || ![[url host] containsString:@"argo.blued.cn"]) return nil;
     NSArray *parts = url.pathComponents;
@@ -52,7 +52,7 @@ NSString *extractTargetUserID(NSURL *url) {
     return nil;
 }
 
-// 查询距离
+// 调用接口查询对方位置/距离
 void requestUserDistance() {
     if (!gAuthToken || !gTargetUserID || gMyLatitude == 0 || gMyLongitude == 0) {
         showAlert(@"提示", @"未获取到令牌/位置/用户ID");
@@ -63,18 +63,20 @@ void requestUserDistance() {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url timeoutInterval:10];
     req.HTTPMethod = @"POST";
 
-    // 请求头
+    // ✅ 完全匹配你抓包的请求头，修正了笔误
     [req setValue:@"zh-CN" forHTTPHeaderField:@"Accept-Language"];
-    [req setValue:@"a001i" forHTTPHeaderField:@"Channel"];
+    [req setValue:@"a0001i" forHTTPHeaderField:@"Channel"]; // 修正：之前少了一个0，现在和抓包一致
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148" forHTTPHeaderField:@"ua"]; // 补充：之前漏了ua头
     [req setValue:@"dark" forHTTPHeaderField:@"X-CLIENT-COLOR"];
     [req setValue:@"social.irisgw.cn" forHTTPHeaderField:@"Host"];
+    [req setValue:@"Mozilla/5.0 (iPhone; iOS 16.5; Scale/3.00; CPU iPhone OS 16_5 like Mac OS X) iOS/120547_2.54.7_6552_9711 (Asia/Shanghai) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 ibb/1.0.0 app/7" forHTTPHeaderField:@"User-Agent"];
     [req setValue:gAuthToken forHTTPHeaderField:@"Authorization"];
     [req setValue:@"https://social.irisgw.cn/users/avatar_map/index" forHTTPHeaderField:@"Referer"];
     [req setValue:@"br, gzip, deflate" forHTTPHeaderField:@"Accept-Encoding"];
     [req setValue:@"" forHTTPHeaderField:@"Cookie"];
 
-    // 请求体
+    // 请求体：使用实时抓取的自身坐标
     NSDictionary *body = @{
         @"self_location": @{
             @"latitude": [NSString stringWithFormat:@"%.15f", gMyLatitude],
@@ -89,7 +91,10 @@ void requestUserDistance() {
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
-        if (err || !data) { showAlert(@"请求失败", err.localizedDescription ?: @"网络错误"); return; }
+        if (err || !data) { 
+            showAlert(@"请求失败", err.localizedDescription ?: @"网络错误"); 
+            return; 
+        }
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         NSArray *avatars = json[@"avatars"];
         for (NSDictionary *user in avatars) {
@@ -98,17 +103,17 @@ void requestUserDistance() {
                 double lat = [user[@"latitude"] doubleValue];
                 double lon = [user[@"longitude"] doubleValue];
                 double dist = calculateDistance(gMyLatitude, gMyLongitude, lat, lon);
-                NSString *msg = [NSString stringWithFormat:@"对方ID：%@\n距离：%.1f 米", uid, dist];
+                NSString *msg = [NSString stringWithFormat:@"对方ID：%@\n距离：%.1f 米\n坐标：%.6f, %.6f", uid, dist, lat, lon];
                 showAlert(@"查询成功", msg);
                 return;
             }
         }
-        showAlert(@"未找到", @"对方不在地图范围");
+        showAlert(@"未找到", @"对方不在当前地图范围内");
     }];
     [task resume];
 }
 
-// 悬浮按钮
+// 添加悬浮按钮
 void addFloatBtn() {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gFloatButton) return;
@@ -124,6 +129,7 @@ void addFloatBtn() {
     });
 }
 
+// 移除悬浮按钮
 void removeFloatBtn() {
     dispatch_async(dispatch_get_main_queue(), ^{
         [gFloatButton removeFromSuperview];
@@ -132,7 +138,7 @@ void removeFloatBtn() {
 }
 
 %ctor {
-    // 抓取Authorization令牌
+    // 1. 自动抓取Authorization令牌（永不过期）
     %hook NSURLRequest
     - (NSDictionary *)allHTTPHeaderFields {
         NSDictionary *orig = %orig;
@@ -142,7 +148,7 @@ void removeFloatBtn() {
     }
     %end
 
-    // 抓取自身实时坐标
+    // 2. 自动抓取自身实时坐标（从/users/selection接口）
     %hook NSURLSessionTask
     - (NSURL *)currentRequest {
         NSURL *url = %orig;
@@ -151,7 +157,7 @@ void removeFloatBtn() {
     }
     %end
 
-    // 个人主页抓取对方ID
+    // 3. 个人主页自动抓取对方ID + 显示悬浮按钮
     %hook UIViewController
     - (void)viewDidLoad {
         %orig;
