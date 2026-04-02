@@ -2,6 +2,9 @@
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
 
+// 提前声明函数
+void th_requestDistance(void);
+
 // 线程安全全局变量
 static NSString *_Nullable gAuthToken = nil;
 static NSString *_Nullable gTargetUserID = nil;
@@ -11,7 +14,7 @@ static UIButton *_Nullable gFloatButton = nil;
 
 #define EARTH_RADIUS 6371000.0
 
-// iOS13+ 兼容窗口（无废弃API）
+// iOS13+ 兼容窗口
 @interface UIApplication (TrackHook)
 - (UIWindow *_Nullable)th_keyWindow;
 @end
@@ -104,15 +107,8 @@ void th_addFloatBtn() {
         gFloatButton.layer.cornerRadius = 22;
         gFloatButton.clipsToBounds = YES;
 
-        __weak typeof(self) weakSelf = self;
-        [gFloatButton addAction:[UIAction actionWithHandler:^(UIAction * _Nonnull action) {
-            // 点击事件：安全调用
-            if (gAuthToken && gTargetUserID && gMyLatitude !=0 && gMyLongitude !=0) {
-                th_requestDistance();
-            } else {
-                th_showAlert(@"提示", @"信息获取中，请稍后重试");
-            }
-        }] forControlEvents:UIControlEventTouchUpInside];
+        // 修复：删除无用的self，直接点击调用
+        [gFloatButton addTarget:nil action:@selector(th_requestDistance) forControlEvents:UIControlEventTouchUpInside];
 
         [window addSubview:gFloatButton];
     });
@@ -129,8 +125,13 @@ void th_removeFloatBtn() {
     });
 }
 
-// 查询距离（网络请求）
+// 查询距离
 void th_requestDistance(void) {
+    if (!gAuthToken || !gTargetUserID || gMyLatitude == 0 || gMyLongitude == 0) {
+        th_showAlert(@"提示", @"信息获取中，请稍后重试");
+        return;
+    }
+
     NSURL *url = [NSURL URLWithString:@"https://social.irisgw.cn/users/avatar_map/index"];
     NSMutableURLRequest *req = [[NSMutableURLRequest alloc] initWithURL:url cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:10];
     req.HTTPMethod = @"POST";
@@ -183,10 +184,10 @@ void th_requestDistance(void) {
 }
 
 // ==============================================
-// 🔥 核心修复：取消全局Hook！只Hook目标类，永不闪退
+// 安全Hook，无全局注入，彻底不闪退
 // ==============================================
 
-// 1. 仅Hook网络请求，抓取令牌（安全）
+// 抓取令牌
 %hook NSURLRequest
 - (NSDictionary *)allHTTPHeaderFields {
     NSDictionary *orig = %orig;
@@ -198,7 +199,7 @@ void th_requestDistance(void) {
 }
 %end
 
-// 2. 仅Hook定位请求，抓取自身坐标（安全）
+// 抓取自身坐标
 %hook NSURLSessionTask
 - (NSURL *)currentRequest {
     NSURL *url = %orig;
@@ -207,11 +208,10 @@ void th_requestDistance(void) {
 }
 %end
 
-// 3. 🔥 关键：Hook WKWebView加载完成，仅个人主页显示按钮（无全局Hook，零闪退）
+// 仅Hook网页加载，个人主页显示按钮
 %hook WKWebView
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     %orig;
-    // 仅处理Blued个人主页
     NSURL *url = webView.URL;
     NSString *uid = th_extractUserID(url);
     if (uid) {
@@ -223,7 +223,4 @@ void th_requestDistance(void) {
 }
 %end
 
-// 构造函数
-%ctor {
-    // 插件初始化，无多余操作
-}
+%ctor { }
