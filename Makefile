@@ -1,15 +1,17 @@
+# 🔥 修复：删除固定SDK版本，自动使用GitHub环境可用SDK
 ARCHS = arm64 arm64e
-TARGET = iphone:clang:15.0:14.0
-INSTALL_TARGET_PROCESSES = Blued  # 目标App是Blued，无需修改
+# 关键修改：TARGET = iphone:clang:最低支持系统
+# 原错误写法：iphone:clang:15.0:14.0
+TARGET = iphone:clang::14.0
+INSTALL_TARGET_PROCESSES = Blued
 
 include $(THEOS)/makefiles/common.mk
 
-# 🔴 必须和项目名、xm文件名、plist名完全一致：TrackHook
 TWEAK_NAME = TrackHook
 
 TrackHook_FILES = TrackHook.xm
 TrackHook_FRAMEWORKS = UIKit Foundation WebKit
-TrackHook_CFLAGS = -fobjc-arc
+TrackHook_CFLAGS = fobjc-arc
 TrackHook_USE_FLEX = 0
 
 include $(THEOS_MAKE_PATH)/tweak.mk
