@@ -1,96 +1,28 @@
-name: Build TrackHook
-
+name: 编译Theos插件
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-14
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      THEOS: ${{ github.workspace }}/theos
-      _THEOS_PLATFORM_DPKG_DEB_COMPRESSION: gzip
-
+    runs-on: macos-latest
     steps:
-      - name: Checkout
+      - name: 拉取代码
         uses: actions/checkout@v4
 
-      - name: Switch to Full Xcode Environment
+      - name: 安装Theos
         run: |
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-path
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
-      - name: Install Dependencies
+      - name: 编译插件
         run: |
-          export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
-          echo "/usr/local/bin" >> $GITHUB_PATH
-          echo "/opt/homebrew/bin" >> $GITHUB_PATH
-          
-          if ! command -v dpkg &> /dev/null; then brew install dpkg; fi
-          if ! command -v ldid &> /dev/null; then brew install ldid; fi
-          if ! command -v xz &> /dev/null; then brew install xz; fi
-          if ! command -v make &> /dev/null; then brew install make; fi
+          make clean
+          make package
 
-      - name: Setup Theos
-        run: |
-          git config --global http.postBuffer 524288000
-          git config --global http.lowSpeedLimit 0
-          git config --global http.lowSpeedTime 600
-          
-          rm -rf $THEOS
-          for i in 1 2 3; do
-            git clone --recursive --depth 1 --shallow-submodules https://github.com/theos/theos.git $THEOS && break
-            rm -rf $THEOS
-            sleep 5
-          done
-          
-          chmod +x $THEOS/bin/*
-          echo "$THEOS/bin" >> $GITHUB_PATH
-
-      - name: Setup SDKs
-        run: |
-          rm -rf $THEOS/sdks
-          for i in 1 2 3; do
-            git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks && break
-            rm -rf $THEOS/sdks
-            sleep 5
-          done
-          
-          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
-            echo "SDK not found!"
-            exit 1
-          fi
-
-      - name: Clean Old Files
-        run: |
-          make clean 2>/dev/null || true
-          rm -rf .theos packages 2>/dev/null || true
-
-      - name: Build & Package
-        run: |
-          export PATH="/usr/local/bin:/opt/homebrew/bin:$THEOS/bin:$PATH"
-          export THEOS=$THEOS
-          
-          # 【核心修复：解决 Error 25】强制将 control 文件转换为 Unix 换行符
-          sed -i '' 's/\r$//' control
-          # 同时处理其他可能受影响的配置文件
-          sed -i '' 's/\r$//' Makefile
-          sed -i '' 's/\r$//' *.plist 2>/dev/null || true
-          
-          make package FINALPACKAGE=1 CODESIGN_IPA=0 V=1
-          
-          if [ ! -f packages/*.deb ]; then
-            echo "FATAL: No deb file built!"
-            exit 1
-          fi
-          
-          ls -la packages/*.deb
-
-      - name: Upload
+      - name: 上传deb包
         uses: actions/upload-artifact@v4
         with:
-          name: TrackHook_DEB
+          name: DebPackage
           path: packages/*.deb
