@@ -11,12 +11,33 @@ static UIButton *gFloatButton = nil;
 
 #define EARTH_RADIUS 6371000.0
 
+// 🔥 修复1：兼容iOS13+ 获取当前Window（修复keyWindow废弃）
+@interface UIApplication (CompatibleWindow)
+- (UIWindow *)compatibleKeyWindow;
+@end
+@implementation UIApplication (CompatibleWindow)
+- (UIWindow *)compatibleKeyWindow {
+    if (@available(iOS 13.0, *)) {
+        for (UIWindowScene *scene in [self connectedScenes]) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                for (UIWindow *window in scene.windows) {
+                    if (window.isKeyWindow) return window;
+                }
+            }
+        }
+    }
+    return self.windows.firstObject;
+}
+@end
+
 // 弹窗
 void showAlert(NSString *title, NSString *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-        UIViewController *topVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+        // 使用兼容窗口
+        UIWindow *window = [[UIApplication sharedApplication] compatibleKeyWindow];
+        UIViewController *topVC = window.rootViewController;
         while (topVC.presentedViewController) topVC = topVC.presentedViewController;
         [topVC presentViewController:alert animated:YES completion:nil];
     });
@@ -60,7 +81,10 @@ void requestUserDistance(void) {
     }
 
     NSURL *url = [NSURL URLWithString:@"https://social.irisgw.cn/users/avatar_map/index"];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url timeoutInterval:10];
+    // 🔥 修复2：替换正确的NSMutableURLRequest初始化方法
+    NSMutableURLRequest *req = [[NSMutableURLRequest alloc] initWithURL:url 
+                                                          cachePolicy:NSURLRequestReloadIgnoringCacheData 
+                                                      timeoutInterval:10];
     req.HTTPMethod = @"POST";
 
     [req setValue:@"zh-CN" forHTTPHeaderField:@"Accept-Language"];
@@ -112,7 +136,8 @@ void requestUserDistance(void) {
 void addFloatBtn() {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gFloatButton) return;
-        UIWindow *window = [UIApplication sharedApplication].keyWindow;
+        // 🔥 修复3：使用兼容窗口
+        UIWindow *window = [[UIApplication sharedApplication] compatibleKeyWindow];
         gFloatButton = [UIButton buttonWithType:UIButtonTypeSystem];
         gFloatButton.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 80, 120, 60, 44);
         [gFloatButton setTitle:@"查距离" forState:UIControlStateNormal];
@@ -131,11 +156,7 @@ void removeFloatBtn() {
     });
 }
 
-// ==============================================
-// 🔥 修复核心：%hook 全部写在全局作用域，不嵌套
-// ==============================================
-
-// 1. 抓取 Authorization 令牌
+// 抓取 Authorization 令牌
 %hook NSURLRequest
 - (NSDictionary *)allHTTPHeaderFields {
     NSDictionary *orig = %orig;
@@ -147,7 +168,7 @@ void removeFloatBtn() {
 }
 %end
 
-// 2. 抓取自身实时坐标
+// 抓取自身实时坐标
 %hook NSURLSessionTask
 - (NSURL *)currentRequest {
     NSURL *url = %orig;
@@ -156,7 +177,7 @@ void removeFloatBtn() {
 }
 %end
 
-// 3. 个人主页抓取用户ID + 按钮
+// 个人主页抓取用户ID + 按钮
 %hook UIViewController
 - (void)viewDidLoad {
     %orig;
@@ -178,7 +199,7 @@ void removeFloatBtn() {
 }
 %end
 
-// 构造函数（仅初始化，无hook）
+// 构造函数
 %ctor {
-    // 空即可，所有hook已在全局定义
+    
 }
