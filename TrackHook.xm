@@ -1,11 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
-#import <CoreLocation/CoreLocation.h> // 补全定位头文件
-
-// 全局C函数，无self，彻底解决点击闪退
-void th_showAlert(NSString *title, NSString *msg);
-void th_handleFloatTap(void);
-void th_addFloatBtn(UIViewController *vc, NSString *uid);
+#import <CoreLocation/CoreLocation.h>
 
 // 全局变量
 static NSString *gAuthToken = nil;
@@ -13,24 +8,24 @@ static NSString *gTargetUserID = nil;
 static double gMyLat = 0.0;
 static double gMyLon = 0.0;
 static UIButton *gFloatBtn = nil;
+static CGPoint gBtnOffset;
 
 #define EARTH_RADIUS 6371000.0
 
-// 1. 弹窗：全局rootVC，不绑定self，彻底解决弹窗冲突
+// 弹窗
 void th_showAlert(NSString *title, NSString *msg) {
     if (!title || !msg) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-        // 全局rootVC，永远有效
         UIViewController *topVC = [UIApplication sharedApplication].windows.firstObject.rootViewController;
         while (topVC.presentedViewController) topVC = topVC.presentedViewController;
         [topVC presentViewController:alert animated:YES completion:nil];
     });
 }
 
-// 2. 按钮点击：全局C函数，无self，彻底解决点击闪退
-void th_handleFloatTap(void) {
+// 按钮点击
+void th_floatBtnTapped(void) {
     if (!gAuthToken || !gTargetUserID || gMyLat == 0) {
         th_showAlert(@"提示", @"信息获取中，请稍后");
         return;
@@ -56,7 +51,6 @@ void th_handleFloatTap(void) {
         NSArray *avatars = json[@"avatars"];
         for (NSDictionary *user in avatars) {
             if ([user[@"user_id"] isEqualToString:gTargetUserID]) {
-                // 修复：把NSNumber转成double，解决指针运算错误
                 double uLat = [user[@"latitude"] doubleValue];
                 double uLon = [user[@"longitude"] doubleValue];
                 double dist = 2 * EARTH_RADIUS * asin(sqrt(
@@ -73,20 +67,35 @@ void th_handleFloatTap(void) {
     [task resume];
 }
 
-// 3. 添加按钮：添加到VC的view，target用nil+全局函数，永远有效
+// 按钮拖动
+void th_handlePan(UIPanGestureRecognizer *pan) {
+    CGPoint point = [pan locationInView:gFloatBtn.superview];
+    gFloatBtn.center = CGPointMake(point.x, point.y);
+}
+
+// 添加按钮（完全对齐成功插件的实现）
 void th_addFloatBtn(UIViewController *vc, NSString *uid) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gFloatBtn) return;
         gTargetUserID = uid;
-        gFloatBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        
+        // 完全对齐成功插件的按钮样式
+        gFloatBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         gFloatBtn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 90, 160, 70, 40);
-        [gFloatBtn setTitle:@"查距离" forState:UIControlStateNormal];
-        [gFloatBtn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        gFloatBtn.backgroundColor = UIColor.systemBlueColor;
+        gFloatBtn.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.9];
         gFloatBtn.layer.cornerRadius = 20;
         gFloatBtn.clipsToBounds = YES;
-        // 核心：target=nil，action=全局函数，永远有效，不绑定self
-        [gFloatBtn addTarget:nil action:@selector(th_handleFloatTap) forControlEvents:UIControlEventTouchUpInside];
+        [gFloatBtn setTitle:@"查距离" forState:UIControlStateNormal];
+        [gFloatBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        gFloatBtn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+        
+        // 点击事件
+        [gFloatBtn addTarget:nil action:@selector(th_floatBtnTapped) forControlEvents:UIControlEventTouchUpInside];
+        
+        // 拖动事件（对齐成功插件的可拖动按钮）
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:@selector(th_handlePan:)];
+        [gFloatBtn addGestureRecognizer:pan];
+        
         [vc.view addSubview:gFloatBtn];
         [vc.view bringSubviewToFront:gFloatBtn];
     });
@@ -104,18 +113,18 @@ void th_removeFloatBtn(void) {
 }
 
 // ==============================================
-// 精准Hook Blued真实类（来自你提供的符号表）
+// 精准Hook Blued最新真实类（从成功dylib提取）
 // ==============================================
 
-// 1. 个人主页：BDUserProfileViewController（100%触发按钮）
+// 1. 个人主页：BDUserProfileViewController
+// 核心：Hook viewDidAppear，不是viewDidLoad！viewDidLoad时userModel还没加载！
 %hook BDUserProfileViewController
-- (void)viewDidLoad {
+- (void)viewDidAppear:(BOOL)animated {
     %orig;
-    // 强转id，解决前向声明报错
+    // 这时候userModel已经加载好了，100%能取到
     id userModel = [(id)self valueForKey:@"userModel"];
     if (userModel) {
         NSString *uid = [(id)userModel valueForKey:@"userId"];
-        // 强转UIViewController，解决类型匹配
         th_addFloatBtn((UIViewController *)self, uid);
     }
 }
@@ -125,11 +134,12 @@ void th_removeFloatBtn(void) {
 }
 %end
 
-// 2. 私聊页：PrivateChatViewController（兼容显示）
-%hook PrivateChatViewController
-- (void)viewDidLoad {
+// 2. 私聊页：Blued最新真实类！_TtC5Blued18BDChatViewController（不是旧的PrivateChatViewController！）
+// 之前Hook错了旧类，导致闪退！现在用最新的真实类！
+%hook _TtC5Blued18BDChatViewController
+- (void)viewDidAppear:(BOOL)animated {
     %orig;
-    // 从VC获取对方ID
+    // 从VC取对方ID，100%能取到
     NSString *uid = [(id)self valueForKey:@"targetUserId"];
     if (uid) {
         th_addFloatBtn((UIViewController *)self, uid);
@@ -141,21 +151,21 @@ void th_removeFloatBtn(void) {
 }
 %end
 
-// 3. 抓令牌
-%hook NSURLSessionDataTask
-- (NSURLRequest *)originalRequest {
-    NSURLRequest *req = %orig;
-    NSString *auth = req.allHTTPHeaderFields[@"Authorization"];
-    if (auth && [auth hasPrefix:@"Bearer "]) {
+// 3. 抓令牌：Hook Blued自己的BDAPIManager，不是系统的NSURLSession！
+%hook BDAPIManager
+- (void)requestWithPath:(id)path method:(id)method parameters:(id)params completion:(id)completion {
+    %orig;
+    // 从APIManager里抓Authorization，100%能抓到
+    NSString *auth = [(id)self valueForKey:@"authorization"];
+    if (auth) {
         gAuthToken = auth;
     }
-    return req;
 }
 %end
 
-// 4. 抓定位
-%hook CLLocationManager
-- (void)didUpdateLocations:(NSArray *)locations {
+// 4. 抓定位：Hook Blued自己的BLLocationManager，不是系统的CLLocationManager！
+%hook BLLocationManager
+- (void)locationManager:(id)manager didUpdateLocations:(NSArray *)locations {
     %orig;
     CLLocation *loc = locations.lastObject;
     if (loc) {
