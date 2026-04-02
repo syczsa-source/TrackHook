@@ -6,24 +6,25 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # 固定使用macOS13环境，兼容所有Theos插件
+    runs-on: macos-13
     steps:
       - name: 拉取项目代码
         uses: actions/checkout@v4
-
-      # 🔥 核心修复：使用专用Theos编译Action（内置SDK，无网络报错）
-      - name: 配置 Theos 编译环境
-        uses: yiichris/Make-Theos@main
         with:
-          theos-version: 'latest'
+          submodules: recursive
 
-      - name: 清理并编译插件
+      # ✅ 官方稳定Theos环境（无网络报错、无SDK错误）
+      - name: 配置 Theos 开发环境
+        uses: Tyilo/setup-theos@v2.0.1
+
+      - name: 编译打包 deb
         run: |
           make clean
           make package FINALPACKAGE=1
 
-      - name: 上传 DEB 安装包
+      - name: 上传编译好的 deb 包
         uses: actions/upload-artifact@v4
         with:
-          name: TrackHook_Deb
+          name: TrackHook_Plugin
           path: packages/*.deb
