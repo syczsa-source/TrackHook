@@ -8,7 +8,6 @@ static NSString *gTargetUserID = nil;
 static double gMyLat = 0.0;
 static double gMyLon = 0.0;
 static UIButton *gFloatBtn = nil;
-static CGPoint gBtnOffset;
 
 #define EARTH_RADIUS 6371000.0
 
