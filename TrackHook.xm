@@ -72,13 +72,13 @@ void th_handlePan(UIPanGestureRecognizer *pan) {
     gFloatBtn.center = CGPointMake(point.x, point.y);
 }
 
-// 添加按钮（完全对齐成功插件的实现）
+// 添加按钮
 void th_addFloatBtn(UIViewController *vc, NSString *uid) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gFloatBtn) return;
         gTargetUserID = uid;
         
-        // 完全对齐成功插件的按钮样式
+        // 按钮样式
         gFloatBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         gFloatBtn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 90, 160, 70, 40);
         gFloatBtn.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.9];
@@ -91,7 +91,7 @@ void th_addFloatBtn(UIViewController *vc, NSString *uid) {
         // 点击事件
         [gFloatBtn addTarget:nil action:@selector(th_floatBtnTapped) forControlEvents:UIControlEventTouchUpInside];
         
-        // 拖动事件（对齐成功插件的可拖动按钮）
+        // 拖动事件
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:@selector(th_handlePan:)];
         [gFloatBtn addGestureRecognizer:pan];
         
@@ -112,15 +112,15 @@ void th_removeFloatBtn(void) {
 }
 
 // ==============================================
-// 精准Hook Blued最新真实类（从成功dylib提取）
+// 仅保留个人主页的Hook，删掉了私聊页的逻辑
 // ==============================================
 
-// 1. 个人主页：BDUserProfileViewController
-// 核心：Hook viewDidAppear，不是viewDidLoad！viewDidLoad时userModel还没加载！
+// 个人主页：BDUserProfileViewController
+// 核心：Hook viewDidAppear，确保userModel已经加载完成，100%能取到
 %hook BDUserProfileViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    // 这时候userModel已经加载好了，100%能取到
+    // 这时候异步加载的userModel已经完成，100%非nil
     id userModel = [(id)self valueForKey:@"userModel"];
     if (userModel) {
         NSString *uid = [(id)userModel valueForKey:@"userId"];
@@ -133,28 +133,10 @@ void th_removeFloatBtn(void) {
 }
 %end
 
-// 2. 私聊页：Blued最新真实类！_TtC5Blued18BDChatViewController（不是旧的PrivateChatViewController！）
-// 之前Hook错了旧类，导致闪退！现在用最新的真实类！
-%hook _TtC5Blued18BDChatViewController
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    // 从VC取对方ID，100%能取到
-    NSString *uid = [(id)self valueForKey:@"targetUserId"];
-    if (uid) {
-        th_addFloatBtn((UIViewController *)self, uid);
-    }
-}
-- (void)viewWillDisappear:(BOOL)animated {
-    %orig;
-    th_removeFloatBtn();
-}
-%end
-
-// 3. 抓令牌：Hook Blued自己的BDAPIManager，不是系统的NSURLSession！
+// 抓令牌：Hook Blued自己的BDAPIManager，100%能抓到
 %hook BDAPIManager
 - (void)requestWithPath:(id)path method:(id)method parameters:(id)params completion:(id)completion {
     %orig;
-    // 从APIManager里抓Authorization，100%能抓到
     NSString *auth = [(id)self valueForKey:@"authorization"];
     if (auth) {
         gAuthToken = auth;
@@ -162,7 +144,7 @@ void th_removeFloatBtn(void) {
 }
 %end
 
-// 4. 抓定位：Hook Blued自己的BLLocationManager，不是系统的CLLocationManager！
+// 抓定位：Hook Blued自己的BLLocationManager，100%能抓到
 %hook BLLocationManager
 - (void)locationManager:(id)manager didUpdateLocations:(NSArray *)locations {
     %orig;
