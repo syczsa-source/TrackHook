@@ -6,10 +6,9 @@ on:
 
 jobs:
   build:
-    # 使用 macOS 官方镜像
     runs-on: macos-latest
     steps:
-      - name: 拉取代码 (GitHub官方)
+      - name: 拉取代码
         uses: actions/checkout@v4
 
       - name: 配置环境变量
@@ -17,22 +16,22 @@ jobs:
           echo "THEOS=${HOME}/theos" >> $GITHUB_ENV
           echo "PATH=${HOME}/theos/bin:$PATH" >> $GITHUB_ENV
 
-      - name: 安装 Theos (原生脚本)
+      - name: 安装 Theos + 签名工具 ldid
         run: |
+          # 安装Theos
           git clone --recursive https://github.com/theos/theos.git $THEOS
-
-      - name: 自动修复SDK (解决SDK不存在报错)
-        run: |
-          # 自动使用系统内置SDK，无需手动下载
+          # 🔥 核心修复：安装ldid签名工具（解决报错）
+          brew install ldid
+          # 修复Xcode SDK路径
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
-      - name: 编译插件
+      - name: 编译打包 deb
         run: |
           make clean
           make package FINALPACKAGE=1
 
-      - name: 上传DEB包 (GitHub官方)
+      - name: 上传DEB插件包
         uses: actions/upload-artifact@v4
         with:
-          name: TrackHook_成品插件
+          name: TrackHook_成品
           path: packages/*.deb
