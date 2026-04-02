@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <CoreLocation/CoreLocation.h> // 补全定位头文件
 
 // 全局C函数，无self，彻底解决点击闪退
 void th_showAlert(NSString *title, NSString *msg);
@@ -55,7 +56,14 @@ void th_handleFloatTap(void) {
         NSArray *avatars = json[@"avatars"];
         for (NSDictionary *user in avatars) {
             if ([user[@"user_id"] isEqualToString:gTargetUserID]) {
-                double dist = 2 * EARTH_RADIUS * asin(sqrt(sin((user[@"latitude"] - gMyLat)*M_PI/360)*sin((user[@"latitude"] - gMyLat)*M_PI/360) + cos(gMyLat*M_PI/180)*cos(user[@"latitude"]*M_PI/180)*sin((user[@"longitude"] - gMyLon)*M_PI/360)*sin((user[@"longitude"] - gMyLon)*M_PI/360)));
+                // 修复：把NSNumber转成double，解决指针运算错误
+                double uLat = [user[@"latitude"] doubleValue];
+                double uLon = [user[@"longitude"] doubleValue];
+                double dist = 2 * EARTH_RADIUS * asin(sqrt(
+                    sin((uLat - gMyLat)*M_PI/360)*sin((uLat - gMyLat)*M_PI/360) + 
+                    cos(gMyLat*M_PI/180)*cos(uLat*M_PI/180)*
+                    sin((uLon - gMyLon)*M_PI/360)*sin((uLon - gMyLon)*M_PI/360)
+                ));
                 th_showAlert(@"成功", [NSString stringWithFormat:@"距离：%.0f米", dist]);
                 return;
             }
