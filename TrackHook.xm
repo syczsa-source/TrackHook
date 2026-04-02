@@ -2,23 +2,24 @@
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
 
-// 全局缓存变量
-static NSString *gAuthToken = nil;
-static NSString *gTargetUserID = nil;
+// 线程安全全局变量
+static NSString *_Nullable gAuthToken = nil;
+static NSString *_Nullable gTargetUserID = nil;
 static double gMyLatitude = 0.0;
 static double gMyLongitude = 0.0;
-static UIButton *gFloatButton = nil;
+static UIButton *_Nullable gFloatButton = nil;
 
 #define EARTH_RADIUS 6371000.0
 
-// 🔥 修复1：兼容iOS13+ 获取当前Window（修复keyWindow废弃）
-@interface UIApplication (CompatibleWindow)
-- (UIWindow *)compatibleKeyWindow;
+// iOS13+ 兼容窗口（无废弃API）
+@interface UIApplication (TrackHook)
+- (UIWindow *_Nullable)th_keyWindow;
 @end
-@implementation UIApplication (CompatibleWindow)
-- (UIWindow *)compatibleKeyWindow {
+@implementation UIApplication (TrackHook)
+- (UIWindow *_Nullable)th_keyWindow {
     if (@available(iOS 13.0, *)) {
-        for (UIWindowScene *scene in [self connectedScenes]) {
+        for (UIWindowScene *scene in self.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             if (scene.activationState == UISceneActivationStateForegroundActive) {
                 for (UIWindow *window in scene.windows) {
                     if (window.isKeyWindow) return window;
@@ -26,25 +27,32 @@ static UIButton *gFloatButton = nil;
             }
         }
     }
+    for (UIWindow *window in self.windows) {
+        if (window.isKeyWindow) return window;
+    }
     return self.windows.firstObject;
 }
 @end
 
-// 弹窗
-void showAlert(NSString *title, NSString *msg) {
+// 安全弹窗
+void th_showAlert(NSString *title, NSString *msg) {
+    if (!title || !msg) return;
     dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = [UIApplication sharedApplication].th_keyWindow;
+        if (!window) return;
+        UIViewController *topVC = window.rootViewController;
+        if (!topVC) return;
+        while (topVC.presentedViewController) {
+            topVC = topVC.presentedViewController;
+        }
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-        // 使用兼容窗口
-        UIWindow *window = [[UIApplication sharedApplication] compatibleKeyWindow];
-        UIViewController *topVC = window.rootViewController;
-        while (topVC.presentedViewController) topVC = topVC.presentedViewController;
         [topVC presentViewController:alert animated:YES completion:nil];
     });
 }
 
 // 距离计算
-double calculateDistance(double myLat, double myLon, double userLat, double userLon) {
+double th_calculateDistance(double myLat, double myLon, double userLat, double userLon) {
     double rad = M_PI / 180.0;
     double dLat = (userLat - myLat) * rad;
     double dLon = (userLon - myLon) * rad;
@@ -53,38 +61,78 @@ double calculateDistance(double myLat, double myLon, double userLat, double user
     return EARTH_RADIUS * c;
 }
 
-// 提取自身经纬度
-void extractMyLocationFromURL(NSURL *url) {
+// 提取自身坐标
+void th_extractMyLocation(NSURL *url) {
     if (!url || ![[url host] containsString:@"social.irisgw.cn"]) return;
     NSURLComponents *comps = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    if (!comps || !comps.queryItems) return;
     for (NSURLQueryItem *item in comps.queryItems) {
-        if ([item.name isEqualToString:@"latitude"]) gMyLatitude = [item.value doubleValue];
-        if ([item.name isEqualToString:@"longitude"]) gMyLongitude = [item.value doubleValue];
+        if ([item.name isEqualToString:@"latitude"]) {
+            gMyLatitude = item.value.doubleValue;
+        }
+        if ([item.name isEqualToString:@"longitude"]) {
+            gMyLongitude = item.value.doubleValue;
+        }
     }
 }
 
 // 提取对方用户ID
-NSString *extractTargetUserID(NSURL *url) {
+NSString *_Nullable th_extractUserID(NSURL *url) {
     if (!url || ![[url host] containsString:@"argo.blued.cn"]) return nil;
     NSArray *parts = url.pathComponents;
+    if (parts.count < 2) return nil;
     for (NSInteger i=0; i<parts.count; i++) {
-        if ([parts[i] isEqualToString:@"users"] && i+1 < parts.count) return parts[i+1];
+        if ([parts[i] isEqualToString:@"users"] && i+1 < parts.count) {
+            return parts[i+1];
+        }
     }
     return nil;
 }
 
-// 查询距离
-void requestUserDistance(void) {
-    if (!gAuthToken || !gTargetUserID || gMyLatitude == 0 || gMyLongitude == 0) {
-        showAlert(@"提示", @"未获取到令牌/位置/用户ID");
-        return;
-    }
+// 安全添加悬浮按钮
+void th_addFloatBtn() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (gFloatButton) return;
+        UIWindow *window = [UIApplication sharedApplication].th_keyWindow;
+        if (!window) return;
 
+        gFloatButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        gFloatButton.frame = CGRectMake(CGRectGetWidth(UIScreen.mainScreen.bounds) - 80, 120, 60, 44);
+        [gFloatButton setTitle:@"查距离" forState:UIControlStateNormal];
+        [gFloatButton setBackgroundColor:UIColor.systemBlueColor];
+        [gFloatButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        gFloatButton.layer.cornerRadius = 22;
+        gFloatButton.clipsToBounds = YES;
+
+        __weak typeof(self) weakSelf = self;
+        [gFloatButton addAction:[UIAction actionWithHandler:^(UIAction * _Nonnull action) {
+            // 点击事件：安全调用
+            if (gAuthToken && gTargetUserID && gMyLatitude !=0 && gMyLongitude !=0) {
+                th_requestDistance();
+            } else {
+                th_showAlert(@"提示", @"信息获取中，请稍后重试");
+            }
+        }] forControlEvents:UIControlEventTouchUpInside];
+
+        [window addSubview:gFloatButton];
+    });
+}
+
+// 安全移除按钮
+void th_removeFloatBtn() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (gFloatButton) {
+            [gFloatButton removeFromSuperview];
+            gFloatButton = nil;
+        }
+        gTargetUserID = nil;
+    });
+}
+
+// 查询距离（网络请求）
+void th_requestDistance(void) {
     NSURL *url = [NSURL URLWithString:@"https://social.irisgw.cn/users/avatar_map/index"];
-    // 🔥 修复2：替换正确的NSMutableURLRequest初始化方法
-    NSMutableURLRequest *req = [[NSMutableURLRequest alloc] initWithURL:url 
-                                                          cachePolicy:NSURLRequestReloadIgnoringCacheData 
-                                                      timeoutInterval:10];
+    NSMutableURLRequest *req = [[NSMutableURLRequest alloc] initWithURL:url cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:10];
     req.HTTPMethod = @"POST";
 
     [req setValue:@"zh-CN" forHTTPHeaderField:@"Accept-Language"];
@@ -93,7 +141,6 @@ void requestUserDistance(void) {
     [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148" forHTTPHeaderField:@"ua"];
     [req setValue:@"dark" forHTTPHeaderField:@"X-CLIENT-COLOR"];
     [req setValue:@"social.irisgw.cn" forHTTPHeaderField:@"Host"];
-    [req setValue:@"Mozilla/5.0 (iPhone; iOS 16.5; Scale/3.00; CPU iPhone OS 16_5 like Mac OS X) iOS/120547_2.54.7_6552_9711 (Asia/Shanghai) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 ibb/1.0.0 app/7" forHTTPHeaderField:@"User-Agent"];
     [req setValue:gAuthToken forHTTPHeaderField:@"Authorization"];
     [req setValue:@"https://social.irisgw.cn/users/avatar_map/index" forHTTPHeaderField:@"Referer"];
     [req setValue:@"br, gzip, deflate" forHTTPHeaderField:@"Accept-Encoding"];
@@ -112,51 +159,34 @@ void requestUserDistance(void) {
     };
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
-        if (err || !data) { showAlert(@"请求失败", err.localizedDescription ?: @"网络错误"); return; }
+    NSURLSessionDataTask *task = [NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *res, NSError *err) {
+        if (err || !data) {
+            th_showAlert(@"请求失败", err.localizedDescription ?: @"网络异常");
+            return;
+        }
         NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        NSArray *avatars = json[@"avatars"];
-        for (NSDictionary *user in avatars) {
+        if (!json || !json[@"avatars"]) return;
+
+        for (NSDictionary *user in json[@"avatars"]) {
             NSString *uid = user[@"user_id"];
             if ([uid isEqualToString:gTargetUserID]) {
                 double lat = [user[@"latitude"] doubleValue];
                 double lon = [user[@"longitude"] doubleValue];
-                double dist = calculateDistance(gMyLatitude, gMyLongitude, lat, lon);
-                NSString *msg = [NSString stringWithFormat:@"对方ID：%@\n距离：%.1f 米", uid, dist];
-                showAlert(@"查询成功", msg);
+                double dist = th_calculateDistance(gMyLatitude, gMyLongitude, lat, lon);
+                th_showAlert(@"查询成功", [NSString stringWithFormat:@"对方ID：%@\n距离：%.1f米", uid, dist]);
                 return;
             }
         }
-        showAlert(@"未找到", @"对方不在地图范围");
+        th_showAlert(@"提示", @"未找到该用户位置");
     }];
     [task resume];
 }
 
-// 悬浮按钮
-void addFloatBtn() {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (gFloatButton) return;
-        // 🔥 修复3：使用兼容窗口
-        UIWindow *window = [[UIApplication sharedApplication] compatibleKeyWindow];
-        gFloatButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        gFloatButton.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 80, 120, 60, 44);
-        [gFloatButton setTitle:@"查距离" forState:UIControlStateNormal];
-        [gFloatButton setBackgroundColor:[UIColor systemBlueColor]];
-        [gFloatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        gFloatButton.layer.cornerRadius = 22;
-        [gFloatButton addTarget:nil action:@selector(requestUserDistance) forControlEvents:UIControlEventTouchUpInside];
-        [window addSubview:gFloatButton];
-    });
-}
+// ==============================================
+// 🔥 核心修复：取消全局Hook！只Hook目标类，永不闪退
+// ==============================================
 
-void removeFloatBtn() {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [gFloatButton removeFromSuperview];
-        gFloatButton = nil;
-    });
-}
-
-// 抓取 Authorization 令牌
+// 1. 仅Hook网络请求，抓取令牌（安全）
 %hook NSURLRequest
 - (NSDictionary *)allHTTPHeaderFields {
     NSDictionary *orig = %orig;
@@ -168,38 +198,32 @@ void removeFloatBtn() {
 }
 %end
 
-// 抓取自身实时坐标
+// 2. 仅Hook定位请求，抓取自身坐标（安全）
 %hook NSURLSessionTask
 - (NSURL *)currentRequest {
     NSURL *url = %orig;
-    extractMyLocationFromURL(url);
+    th_extractMyLocation(url);
     return url;
 }
 %end
 
-// 个人主页抓取用户ID + 按钮
-%hook UIViewController
-- (void)viewDidLoad {
+// 3. 🔥 关键：Hook WKWebView加载完成，仅个人主页显示按钮（无全局Hook，零闪退）
+%hook WKWebView
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     %orig;
-    for (UIView *v in self.view.subviews) {
-        if ([v isKindOfClass:[WKWebView class]]) {
-            WKWebView *web = (WKWebView *)v;
-            gTargetUserID = extractTargetUserID(web.URL);
-            if (gTargetUserID) {
-                addFloatBtn();
-            }
-        }
+    // 仅处理Blued个人主页
+    NSURL *url = webView.URL;
+    NSString *uid = th_extractUserID(url);
+    if (uid) {
+        gTargetUserID = uid;
+        th_addFloatBtn();
+    } else {
+        th_removeFloatBtn();
     }
-}
-
-- (void)viewWillDisappear:(BOOL)animated {
-    %orig;
-    removeFloatBtn();
-    gTargetUserID = nil;
 }
 %end
 
 // 构造函数
 %ctor {
-    
+    // 插件初始化，无多余操作
 }
