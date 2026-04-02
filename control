@@ -1,9 +1,9 @@
-Package: com.bluecity.distance
-Name: Blued距离查询
+Package: com.your.trackhook
+Name: TrackHook
 Version: 1.0
 Architecture: iphoneos-arm64
-Description: 自动抓令牌/坐标/ID 主页查距离
-Depends: mobilesubstrate
-Maintainer: dev
-Author: dev
+Description: Blued用户位置/距离查询插件（自动抓坐标/令牌/ID）
+Depends: mobilesubstrate, firmware (>=14.0)
+Maintainer: Your Name
+Author: Your Name
 Section: Tweaks
