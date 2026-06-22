@@ -1,14 +1,11 @@
-ARCHS = arm64 arm64e
-TARGET = iphone:clang:15.5:14.0
-INSTALL_TARGET_PROCESSES = Blued
-
-include $(THEOS)/makefiles/common.mk
-
-TWEAK_NAME = TrackTweak
-
-TrackTweak_FILES = TrackTweak.xm
-TrackTweak_FRAMEWORKS = UIKit Foundation
-TrackTweak_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
-TrackTweak_LIBRARIES = objc
-
-include $(THEOS_MAKE_PATH)/tweak.mk
+Package: com.syczsa.trackhook
+Name: TrackHook
+Version: 1.0.0
+Section: Tweaks
+Priority: optional
+Architecture: $(ARCHS)
+Depends: mobilesubstrate
+Maintainer: syczsa
+Description: TrackHook 递归几何定位追踪插件
+Author: syczsa
+Homepage: https://github.com/syczsa-source/TrackHook
