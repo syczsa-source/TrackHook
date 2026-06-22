@@ -28,11 +28,16 @@ jobs:
         run: |
           set -e
           make clean
-          # 开启详细日志，方便排查问题
-          THEOS_VERBOSE=1 make package FINALPACKAGE=1
-          # 打印产物目录，确认 deb 生成位置
-          echo "===== 产物目录 packages ====="
-          ls -la packages/ || echo "packages 目录不存在"
+          make package FINALPACKAGE=1
+          # 给生成的包文件补上 .deb 后缀
+          for f in packages/*; do
+            if [ -f "$f" ] && [[ "$f" != *.deb ]]; then
+              mv "$f" "${f}.deb"
+            fi
+          done
+          # 打印最终产物确认
+          echo "===== 最终产物 ====="
+          ls -la packages/
 
       - name: 上传DEB插件包
         uses: actions/upload-artifact@v4
