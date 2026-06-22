@@ -3,7 +3,7 @@ Name: TrackHook
 Version: 1.0.0
 Section: Tweaks
 Priority: optional
-Architecture: $(ARCHS)
+Architecture: arm64 arm64e
 Depends: mobilesubstrate
 Maintainer: syczsa
 Description: TrackHook 递归几何定位追踪插件
