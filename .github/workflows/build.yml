@@ -15,25 +15,32 @@ jobs:
         run: |
           echo "THEOS=${HOME}/theos" >> $GITHUB_ENV
           echo "PATH=${HOME}/theos/bin:$PATH" >> $GITHUB_ENV
+          # 屏蔽Homebrew tap警告
+          echo "HOMEBREW_NO_REQUIRE_TAP_TRUST=1" >> $GITHUB_ENV
 
       - name: 安装依赖 + Theos
         run: |
-          # 安装签名工具+换行符转换工具
           brew install ldid dos2unix
-          # 转换control为Unix换行符（修复核心报错）
           dos2unix control
-          # 安装Theos
           git clone --recursive https://github.com/theos/theos.git $THEOS
-          # 配置Xcode
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
       - name: 编译打包 deb
         run: |
+          set -e
           make clean
           make package FINALPACKAGE=1
+          # 打印两个目录，方便日志排查deb位置
+          echo "===== 根目录packages文件夹 ====="
+          ls -la packages/ || echo "packages文件夹不存在"
+          echo "===== .theos/packages文件夹 ====="
+          ls -la .theos/packages/ || echo ".theos/packages文件夹不存在"
 
       - name: 上传DEB插件包
         uses: actions/upload-artifact@v4
         with:
           name: TrackHook_成品插件
-          path: packages/*.deb
+          # 兼容新旧Theos双输出目录，两个路径同时匹配
+          path: |
+            packages/*.deb
+            .theos/packages/*.deb
