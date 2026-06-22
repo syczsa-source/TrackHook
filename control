@@ -6,6 +6,6 @@ Priority: optional
 Architecture: $(ARCHS)
 Depends: mobilesubstrate
 Maintainer: syczsa
-Description: 递归几何定位追踪插件
+Description: TrackHook 递归几何定位追踪插件
 Author: syczsa
 Homepage: https://github.com/syczsa-source/TrackHook
