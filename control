@@ -1,9 +1,11 @@
-Package: com.your.trackhook
+Package: com.syczsa.trackhook
 Name: TrackHook
-Version: 1.0
-Architecture: iphoneos-arm64
-Description: Blued用户位置/距离查询插件（自动抓坐标/令牌/ID）
-Depends: mobilesubstrate, firmware (>=14.0)
-Maintainer: Your Name
-Author: Your Name
+Version: 1.0.0
 Section: Tweaks
+Priority: optional
+Architecture: $(ARCHS)
+Depends: mobilesubstrate
+Maintainer: syczsa
+Description: 递归几何定位追踪插件
+Author: syczsa
+Homepage: https://github.com/syczsa-source/TrackHook
